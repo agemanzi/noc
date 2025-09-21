@@ -22,83 +22,77 @@ class Charts:
         self.max_points = max_points
         self.comfort = comfort
 
-        # data buffers (live)
+        # live buffers
         self.buf = {
             "t": collections.deque(maxlen=max_points),
-            # electricity components (kW)
             "pv_kw": collections.deque(maxlen=max_points),
-            "batt_kw": collections.deque(maxlen=max_points),   # +discharge to house, -charge from grid
-            "hvac_kw": collections.deque(maxlen=max_points),   # negative = draw
-            "other_kw": collections.deque(maxlen=max_points),  # negative = draw
-            "total_kw": collections.deque(maxlen=max_points),  # balance = sum above
-            # actions & price
-            "hvac_act": collections.deque(maxlen=max_points),  # -1..1
-            "batt_act": collections.deque(maxlen=max_points),  # -1..1
-            "price": collections.deque(maxlen=max_points),     # price per kWh
-            "occupied": collections.deque(maxlen=max_points),  # 0/1 occupancy
-            # temps & weather
+            "batt_kw": collections.deque(maxlen=max_points),
+            "hvac_kw": collections.deque(maxlen=max_points),
+            "other_kw": collections.deque(maxlen=max_points),
+            "total_kw": collections.deque(maxlen=max_points),
+            "hvac_act": collections.deque(maxlen=max_points),
+            "batt_act": collections.deque(maxlen=max_points),
+            "price": collections.deque(maxlen=max_points),
+            "occupied": collections.deque(maxlen=max_points),
             "Tin": collections.deque(maxlen=max_points),
             "Tout": collections.deque(maxlen=max_points),
-            "solar": collections.deque(maxlen=max_points),     # W/m^2
+            "solar": collections.deque(maxlen=max_points),
+            "reward": collections.deque(maxlen=max_points),
         }
 
-        # prepare figure/axes
-        self.fig = Figure(figsize=(9.5, 6.8), dpi=100)
-
-        # 2 x 2 layout
+        # figure & axes
+        self.fig = Figure(figsize=(9.5, 6.8), dpi=100, constrained_layout=True)
         self.ax_elec    = self.fig.add_subplot(221, title="Electricity Profile (kW)")
+        self.ax_actions = self.fig.add_subplot(222, title="Player Actions & Price", sharex=self.ax_elec)
+        self.ax_temp    = self.fig.add_subplot(223, title="Indoor Temperature (°C)", sharex=self.ax_elec)
+        self.ax_weather = self.fig.add_subplot(224, title="Weather: T_out / Solar", sharex=self.ax_elec)
         self.ax_elec.axhline(0, lw=0.8, alpha=0.6)
-        self.ax_actions = self.fig.add_subplot(222, title="Player Actions & Price")
-        self.ax_temp    = self.fig.add_subplot(223, title="Indoor Temperature (°C)")
-        self.ax_weather = self.fig.add_subplot(224, title="Weather: T_out / Solar")
 
-        # secondary axes
-        self.ax_price = self.ax_actions.twinx()
-        self.ax_solar = self.ax_weather.twinx()
+        # twin axes
+        self.ax_price  = self.ax_actions.twinx()
+        self.ax_solar  = self.ax_weather.twinx()
+        self.ax_reward = self.ax_temp.twinx()
+        self.ax_reward.spines["right"].set_position(("axes", 1.10))
+        self.ax_reward.set_frame_on(True)
+        self.ax_reward.patch.set_visible(False)
+        # ensure reward ticks draw above temp axis
+        self.ax_temp.set_zorder(2); self.ax_reward.set_zorder(3); self.ax_temp.patch.set_visible(False)
 
-        # --- fixed palette/colors
+        # colors
         palette = mpl.rcParams['axes.prop_cycle'].by_key().get(
-            'color',
-            ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8dd3c7"]
+            'color', ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8dd3c7"]
         )
         self.colors = {
-            "total":    palette[0],
-            "pv":       palette[1],
-            "batt_pos": palette[2],
-            "hvac":     palette[3],
-            "other":    palette[4],
-            "batt_chg": palette[5],
-            # forecast strokes reuse existing hues but dotted and lighter
-            "forecast": "#444444",
-            "occ_band": "#94a3b8",  # slate-ish
+            "total": palette[0], "pv": palette[1], "batt_pos": palette[2],
+            "hvac": palette[3], "other": palette[4], "batt_chg": palette[5],
+            "forecast": "#444444", "occ_band": "#94a3b8",
+            "solar_area": "#fbbf24", "comfort_band": "#60a5fa", "reward": "#1f2937",
         }
 
-        # electricity total line
-        (self.l_total,) = self.ax_elec.plot([], [], lw=2, color=self.colors["total"], label="_nolegend_", zorder=5)
+        # live lines
+        (self.l_total,)   = self.ax_elec.plot([], [], lw=2, color=self.colors["total"], label="_nolegend_", zorder=5)
+        (self.l_hvac_act,)= self.ax_actions.plot([], [], lw=1.8, label="HVAC action")
+        (self.l_batt_act,)= self.ax_actions.plot([], [], lw=1.2, label="Battery action")
+        (self.l_price,)   = self.ax_price.plot([], [], lw=1.5, color="green", label="Price")
+        (self.l_Tin,)     = self.ax_temp.plot([], [], lw=2, label="T_inside")
+        (self.l_reward,)  = self.ax_reward.plot([], [], lw=1.8, color=self.colors["reward"], label="Reward (€/step)")
+        (self.l_Tout,)    = self.ax_weather.plot([], [], lw=2, label="T_outside")
+        (self.l_solar,)   = self.ax_solar.plot([], [], lw=1.6, linestyle="--",
+                                            color=self.colors["solar_area"], label="Solar (W/m²)")
+        self._solar_fill = None
+        self._temp_band  = None
+        self._occ_fill   = None
+        self._occ_fill_fc= None
 
-        # actions/prices (live)
-        (self.l_hvac_act,) = self.ax_actions.plot([], [], lw=1.8, label="HVAC action")
-        (self.l_batt_act,) = self.ax_actions.plot([], [], lw=1.2, label="Battery action")
-        (self.l_price,)    = self.ax_price.plot([], [], lw=1.5, linestyle="--", label="Price")
-
-        # occupancy bands (live + forecast), created on demand
-        self._occ_fill = None
-        self._occ_fill_fc = None
-
-        # temperature (live) and weather (live)
-        (self.l_Tin,)   = self.ax_temp.plot([], [], lw=2, label="T_inside")
-        (self.l_Tout,)  = self.ax_weather.plot([], [], lw=2, label="T_outside")
-        (self.l_solar,) = self.ax_solar.plot([], [], lw=1.6, linestyle="--", label="Solar (W/m²)")
-
-        # forecast overlays (created once, updated when forecast provided)
+        # forecast lines
         (self.l_price_fc,) = self.ax_price.plot([], [], lw=1.2, linestyle=":", alpha=0.9,
                                                 color=self.colors["forecast"], label="Price (next 12h)")
         (self.l_Tout_fc,)  = self.ax_weather.plot([], [], lw=1.2, linestyle=":", alpha=0.9,
-                                                  color=self.colors["forecast"], label="T_out (next 12h)")
+                                                color=self.colors["forecast"], label="T_out (next 12h)")
         (self.l_solar_fc,) = self.ax_solar.plot([], [], lw=1.1, linestyle=":", alpha=0.9,
                                                 color=self.colors["forecast"], label="Solar (next 12h)")
 
-        # static legend for electricity stack (fixed order/colors)
+        # electricity legend + initial y range
         elec_handles = [
             Line2D([], [], lw=2, color=self.colors["total"], label="Total balance"),
             Patch(alpha=0.35, facecolor=self.colors["pv"],       label="PV (+)"),
@@ -108,17 +102,20 @@ class Charts:
             Patch(alpha=0.35, facecolor=self.colors["batt_chg"], label="Battery (charge)"),
         ]
         self.ax_elec.legend(handles=elec_handles, loc="upper left")
+        self.ax_elec.set_ylim(-10, 10)
 
-        # styles
+        # styles & labels
         for ax in (self.ax_elec, self.ax_actions, self.ax_temp, self.ax_weather):
             ax.grid(True, alpha=0.25)
-
         self.ax_actions.set_ylim(-1.05, 1.05)
+        self.ax_temp.set_ylim(15, 25)
         self.ax_actions.set_ylabel("Action (-1..1)")
         self.ax_price.set_ylabel("Price (€/kWh)")
         self.ax_temp.set_ylabel("°C")
+        self.ax_reward.set_ylabel("Reward (€/step)")
         self.ax_weather.set_ylabel("°C")
         self.ax_solar.set_ylabel("W/m²")
+        self.ax_reward.tick_params(axis="y", labelcolor="#374151")
 
         # legends
         self.ax_actions.legend(loc="upper left")
@@ -127,19 +124,16 @@ class Charts:
         self.ax_weather.legend(loc="upper left")
         self.ax_solar.legend(loc="upper right")
 
-        # embed
+        # embed + time axes
         self.canvas = FigureCanvasTkAgg(self.fig, root)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        # nice time axes
-        locator = mdates.AutoDateLocator()
-        fmt = mdates.ConciseDateFormatter(locator)
+        locator = mdates.AutoDateLocator(); fmt = mdates.ConciseDateFormatter(locator)
         for ax in (self.ax_elec, self.ax_actions, self.ax_temp, self.ax_weather):
             ax.xaxis.set_major_locator(locator)
             ax.xaxis.set_major_formatter(fmt)
-    
-        # keep last stacked polys so we can remove before replot
+
         self._elec_fills = []
+
 
     # --------------- public API ----------------------------------------------
     def update(self, step_or_state, metrics: dict):
@@ -179,6 +173,7 @@ class Charts:
         B["Tin"].append(getattr(s, "T_inside", metrics.get("T_inside")))
         B["Tout"].append(metrics.get("T_outside", getattr(s, "T_outside", None)))
         B["solar"].append(metrics.get("solar"))
+        B["reward"].append(nz(metrics.get("reward")))
 
         # optional forecast payload
         self._forecast = metrics.get("forecast", None)
@@ -239,8 +234,12 @@ class Charts:
         # total line
         self.l_total.set_data(t, total)
 
-        # autoscale
+        # autoscale to data first
         self.ax_elec.relim(); self.ax_elec.autoscale_view()
+
+        # ensure at least ±10 kW visible (don't shrink if data exceeded that)
+        ymin, ymax = self.ax_elec.get_ylim()
+        self.ax_elec.set_ylim(min(ymin, -10), max(ymax, 10))
 
     def _draw_actions(self):
         t = np.asarray(self.buf["t"], dtype=float)
@@ -308,25 +307,47 @@ class Charts:
         # x formatting (already set in __init__, but safe)
         self.ax_actions.xaxis.set_major_locator(mdates.AutoDateLocator())
         self.ax_actions.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
-
     def _draw_temperature(self):
         t = np.asarray(self.buf["t"], dtype=float)
         if t.size < 2:
             return
-        Tin = np.asarray(self.buf["Tin"], dtype=float)
-        self.l_Tin.set_data(t, Tin)
+
+        Tin    = np.asarray(self.buf["Tin"],    dtype=float)
+        reward = np.asarray(self.buf["reward"], dtype=float)
+
+        # align temp
+        n = min(t.size, Tin.size)
+        tt, Tin_t = t[-n:], Tin[-n:]
+        self.l_Tin.set_data(tt, Tin_t)
 
         # comfort band
         lo, hi = self.comfort
-        # remove old band if present
-        if hasattr(self, "_temp_band") and self._temp_band:
+        if self._temp_band:
             try: self._temp_band.remove()
             except Exception: pass
-        self._temp_band = self.ax_temp.fill_between(
-            t, lo, hi, alpha=0.15, step=None, label=f"Comfort {lo:g}–{hi:g}°C"
-        )
+            self._temp_band = None
+        if n > 0:
+            self._temp_band = self.ax_temp.fill_between(
+                tt, lo, hi, alpha=0.18, facecolor=self.colors["comfort_band"],
+                edgecolor="none", label="_nolegend_", zorder=0
+            )
 
-        self.ax_temp.relim(); self.ax_temp.autoscale_view()
+        # reward (only if data exists)
+        nr = min(t.size, reward.size)
+        if nr > 0:
+            tr, rr = t[-nr:], reward[-nr:]
+            self.l_reward.set_data(tr, rr)
+        else:
+            self.l_reward.set_data([], [])
+
+        # autoscale
+        self.ax_temp.relim(); self.ax_temp.autoscale_view(scalex=True, scaley=True)
+        ymin, ymax = self.ax_temp.get_ylim()
+        self.ax_temp.set_ylim(min(ymin, 15.0), max(ymax, 25.0))
+        if nr > 0:
+            self.ax_reward.relim(); self.ax_reward.autoscale_view(scalex=True, scaley=True)
+
+        # time axis (kept explicit for stability)
         self.ax_temp.xaxis.set_major_locator(mdates.AutoDateLocator())
         self.ax_temp.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
 
@@ -334,11 +355,30 @@ class Charts:
         t = np.asarray(self.buf["t"], dtype=float)
         if t.size < 2:
             return
-        Tout = np.asarray(self.buf["Tout"], dtype=float)
-        solar= np.asarray(self.buf["solar"], dtype=float)
 
-        self.l_Tout.set_data(t, Tout)
-        self.l_solar.set_data(t, solar)
+        Tout   = np.asarray(self.buf["Tout"],   dtype=float)
+        solar  = np.asarray(self.buf["solar"],  dtype=float)
+
+        # Keep arrays aligned: trim to common length for plotting
+        # (This avoids shape mismatch on first few frames.)
+        n = min(t.size, Tout.size)
+        tt, TT = t[-n:], Tout[-n:]
+
+        self.l_Tout.set_data(tt, TT)
+
+        # solar line + area
+        ns = min(t.size, solar.size)
+        t_s, s_s = t[-ns:], solar[-ns:]
+        self.l_solar.set_data(t_s, s_s)
+
+        if self._solar_fill:
+            try: self._solar_fill.remove()
+            except Exception: pass
+            self._solar_fill = None
+        if ns > 0:
+            self._solar_fill = self.ax_solar.fill_between(
+                t_s, 0.0, s_s, alpha=0.25, color=self.colors["solar_area"], label="_nolegend_"
+            )
 
         # forecast overlays for weather (Tout + Solar)
         if self._forecast:
@@ -356,7 +396,9 @@ class Charts:
             self.l_Tout_fc.set_data([], [])
             self.l_solar_fc.set_data([], [])
 
+        # autoscale weather and solar axes
         self.ax_weather.relim(); self.ax_weather.autoscale_view(scalex=True, scaley=True)
         self.ax_solar.relim();   self.ax_solar.autoscale_view(scalex=True, scaley=True)
+        
         self.ax_weather.xaxis.set_major_locator(mdates.AutoDateLocator())
         self.ax_weather.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))

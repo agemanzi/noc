@@ -12,7 +12,7 @@ from ..engine.simulation import SimulationEngine
 from ..engine.recorder import GameRecorder
 from ..engine.settings import GameSettings
 from ..engine.datafeed import DataFeed
-
+from ..engine.reward import step_reward, RewardConfig
 
 import datetime as dt
 
@@ -75,6 +75,21 @@ class App:
         self.root.bind("<F1>", lambda e: self.bat.set(-1))
         self.root.bind("<F2>", lambda e: self.bat.set(0))
         self.root.bind("<F3>", lambda e: self.bat.set(1))
+
+        # Arrow keys: Left = cool, Right = heat
+        self.root.bind("<Left>",  lambda e: self._hvac_nudge(-0.05))
+        self.root.bind("<Right>", lambda e: self._hvac_nudge(+0.05))
+
+        # Shift+Arrow for bigger steps
+        self.root.bind("<Shift-Left>",  lambda e: self._hvac_nudge(-0.15))
+        self.root.bind("<Shift-Right>", lambda e: self._hvac_nudge(+0.15))
+
+        # Press-and-hold auto-repeat
+        self.root.bind("<KeyPress-Left>",  lambda e: self._hvac_hold_start(-0.03))
+        self.root.bind("<KeyPress-Right>", lambda e: self._hvac_hold_start(+0.03))
+        self.root.bind("<KeyRelease-Left>",  self._hvac_hold_stop)
+        self.root.bind("<KeyRelease-Right>", self._hvac_hold_stop)
+
 
     # --------- LEFT SIDE -----------------------------------------------------
     def _badge(self, parent, text, bg):
@@ -177,6 +192,7 @@ class App:
             "hvac_heat": "HVAC Heat/Cool (kW)",
             "pv_gen": "PV Generation (kW)",
             "batt_soc": "Battery SOC",
+            "reward": "Reward (€/step)",
         }
         self.out_vars = {k: tk.StringVar(value="–") for k in labels}
         r = 0
@@ -191,9 +207,29 @@ class App:
         self.bat  = tk.IntVar(value=0)          # will be driven by radios: -1 / 0 / +1
         self.pv_on = tk.BooleanVar(value=True)
 
-        # HVAC slider
-        ttk.Scale(self.controls, from_=-1, to=1, variable=self.hvac,
-                orient="horizontal").grid(row=0, column=0, sticky="ew", padx=6)
+        # HVAC slider + arrow buttons
+        hvac_frame = ttk.Frame(self.controls)
+        hvac_frame.grid(row=0, column=0, sticky="ew", padx=6)
+
+        btn_left  = ttk.Button(hvac_frame, text="◀", width=2)
+        btn_right = ttk.Button(hvac_frame, text="▶", width=2)
+        btn_left.grid(row=0, column=0, padx=(0,4))
+        btn_right.grid(row=0, column=2, padx=(4,0))
+
+        scale = ttk.Scale(hvac_frame, from_=-1, to=1, variable=self.hvac, orient="horizontal")
+        scale.grid(row=0, column=1, sticky="ew")
+        hvac_frame.columnconfigure(1, weight=1)
+
+        # click for single nudge
+        btn_left.configure(command=lambda: self._hvac_nudge(-0.05))
+        btn_right.configure(command=lambda: self._hvac_nudge(+0.05))
+
+        # press-and-hold repeat on buttons
+        btn_left.bind("<ButtonPress-1>",  lambda e: self._hvac_hold_start(-0.03))
+        btn_right.bind("<ButtonPress-1>", lambda e: self._hvac_hold_start(+0.03))
+        btn_left.bind("<ButtonRelease-1>",  self._hvac_hold_stop)
+        btn_right.bind("<ButtonRelease-1>", self._hvac_hold_stop)
+
         ttk.Label(self.controls, text="HVAC -1..1").grid(row=1, column=0)
 
         # Battery radio group (in a small frame)
@@ -234,10 +270,12 @@ class App:
         price       = float(row.price_eur_per_kwh)
         T_outside   = float(row.t_out_c)
         pv_kwp_yield = float(row.solar_gen_kw_per_kwp)            # kW per kWp (0..~1)
-        pv_kw       = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
-        other_kw    = -float(row.base_load_kw)                     # charts expect loads negative
-        hvac_kw     = abs(self.settings.hvac_size_kw * float(self.hvac.get()))  # positive; charts negate
-        battery_kw  = int(self.bat.get()) * (self.settings.batt_size_kwh / 5.0) # toy mapping (+disch, -charge)
+        pv_kw = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
+        base_load_kw = float(row.base_load_kw)  # positive consumption
+
+        # Optional simple gains
+        q_internal_kw = 0.7 if occupied else 0.3      # tweak as you like
+        q_solar_kw    = 0.0                            # start at 0 (or small factor * pv_kwp_yield)
 
         # 4) step the engine (supports new or legacy signature)
         try:
@@ -245,16 +283,40 @@ class App:
                 "ts": row.ts,
                 "T_outside": T_outside,
                 "price": price,
-                "pv_kw": pv_kw,
-                "base_load_kw": -other_kw,  # positive consumption for engine
-                "hvac_kw": hvac_kw,
+                "pv_kw": pv_kw,                # generation (+)
+                "base_load_kw": base_load_kw,  # consumption (+)
                 "battery_cmd": int(self.bat.get()),
                 "settings": self.settings,
                 "occupied_home": int(occupied),
+                "q_internal_kw": q_internal_kw,
+                "q_solar_kw": q_solar_kw,
             })
         except TypeError:
             self.state.T_outside = T_outside
             step = self.engine.step(self.state, action)
+
+        # Now pull all powers from step.metrics (single source of truth):
+        m = step.metrics
+        hvac_kw    = float(m.get("hvac_kw", 0.0))       # (+) electric draw
+        battery_kw = float(m.get("battery_kw", 0.0))    # (+) discharge, (−) charge
+        other_kw   = float(m.get("other_kw", 0.0))      # (−) load for chart convention
+        pv_kw      = float(m.get("pv_kw", pv_kw))
+        total_kw   = float(m.get("total_kw", pv_kw + battery_kw - hvac_kw + other_kw))
+        elec_kwh   = float(m.get("electricity", 0.0))   # energy for this step
+
+        # --- reward (cost + comfort) ---
+        dt_h = self.engine.dt / 3600.0
+        grid_import_kw = max(0.0, total_kw)              # positive = import from grid
+        kwh_from_grid  = grid_import_kw * dt_h
+        opex_eur       = price * kwh_from_grid           # cost this step
+
+        comfort_penalty = (0.0 if not occupied
+                           else max(0.0, abs(step.state.T_inside - 22.0) - 1.0))  # °C outside 21–23
+        lambda_c = 0.5                                   # tune weight (€/°C-step)
+        reward = -(opex_eur + lambda_c * comfort_penalty)
+
+        # show in UI
+        self.out_vars["reward"].set(f"{reward:+.3f}")
 
         # 5) UI: occupancy text + house overlay (simple night filter from solar)
         self.occupancy_var.set("Occupied" if occupied else "Away")
@@ -270,10 +332,12 @@ class App:
             "hvac_kw": hvac_kw,
             "battery_kw": battery_kw,
             "other_kw": other_kw,
-            "solar": pv_kwp_yield * 1000.0,      # show as ~W/m²-like scale for weather plot
+            "total_kw": total_kw,
+            "solar": pv_kwp_yield * 1000.0,
             "occupancy": int(occupied),
-            "comfort_penalty": (0.0 if not occupied else max(0.0, abs(step.state.T_inside - 22.0) - 1.0)),
-            "electricity": hvac_kw * (self.engine.dt / 3600.0),
+            "comfort_penalty": comfort_penalty,
+            "electricity": elec_kwh,  # <-- use engine value, not hvac_kw*dt
+            "reward": reward,
         })
 
         # advance state
@@ -284,29 +348,16 @@ class App:
         self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
                             bg=("#10b981" if self.pv_on.get() else "#6b7280"))
         self.badge_bat.config(text=f"Batt {int(self.state.soc*100):d}%")
-        self.out_vars["hvac_heat"].set(f"{hvac_kw:0.2f}")
+        self.out_vars["hvac_heat"].set(f"{hvac_kw:0.2f}")   # this is electric draw (label text can be renamed later)
         self.out_vars["pv_gen"].set(f"{pv_kw:0.2f}")
         self.out_vars["batt_soc"].set(f"{self.state.soc:0.2f}")
+        self.out_vars["reward"].set(f"{m.get('reward', 0.0):+.3f}")
 
         # 8) charts: live point (+ occupancy)
-        metrics = {
-            "timestamp": row.ts,
-            "pv_kw": pv_kw,
-            "battery_kw": battery_kw,
-            "hvac_kw": hvac_kw,                # Charts will negate for draw
-            "other_kw": other_kw,
-            "price": price,
-            "solar": pv_kwp_yield * 1000.0,
-            "T_outside": T_outside,
-            "hvac_act": float(action.hvac),
-            "batt_act": float(action.battery),
-            "occupied": int(occupied),         # <— NEW
-        }
-
         # If your Charts supports a future window, pass it (non-breaking try/except)
         try:
             fw = self.feed.window_by_time(self.state.t, horizon_steps=48)
-            metrics["forecast"] = {
+            forecast_data = {
                 "ts": fw.ts,
                 "t_out_c": fw.t_out_c,
                 "solar_per_kwp": fw.solar_gen_kw_per_kwp,
@@ -315,9 +366,24 @@ class App:
                 "occupied": fw.occupied_home,
             }
         except Exception:
-            pass
+            forecast_data = None
 
-        self.charts.update(step, metrics)
+        self.charts.update(step, {
+            "timestamp": row.ts,
+            "pv_kw": pv_kw,
+            "battery_kw": battery_kw,
+            "hvac_kw": hvac_kw,
+            "other_kw": other_kw,
+            "price": price,
+            "solar": pv_kwp_yield * 1000.0,
+            "T_outside": T_outside,
+            "hvac_act": float(action.hvac),
+            "batt_act": float(action.battery),
+            "occupied": int(occupied),
+            "reward": reward,
+            # keep passing forecast if you have it
+            "forecast": forecast_data,
+        })
 
         # 9) status line
         self.status.config(text=f"Status: {row.ts:%Y-%m-%d %H:%M}  kWh={self.state.kwh_used:.3f}")
@@ -393,6 +459,30 @@ class App:
 
         ttk.Button(win, text="Save", command=save_and_close).grid(row=4, column=0, columnspan=2, pady=8)
 
+    # --- HVAC auto-repeat helpers --------------------------------------------
+    def _clamp(self, x, lo=-1.0, hi=1.0):  # reuse anywhere
+        return max(lo, min(hi, x))
+
+    def _hvac_set(self, val: float):
+        self.hvac.set(self._clamp(val))
+
+    def _hvac_nudge(self, delta: float):
+        self._hvac_set(self.hvac.get() + delta)
+
+    def _hvac_hold_start(self, delta: float, interval_ms: int = 80):
+        # start repeating nudge while key/mouse is held
+        self._hvac_hold_delta = delta
+        if getattr(self, "_hvac_hold_after", None):
+            self.root.after_cancel(self._hvac_hold_after)
+        def tick():
+            self._hvac_nudge(self._hvac_hold_delta)
+            self._hvac_hold_after = self.root.after(interval_ms, tick)
+        tick()
+
+    def _hvac_hold_stop(self, *_):
+        if getattr(self, "_hvac_hold_after", None):
+            self.root.after_cancel(self._hvac_hold_after)
+            self._hvac_hold_after = None
 
 
 if __name__ == "__main__":

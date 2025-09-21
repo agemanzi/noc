@@ -7,14 +7,16 @@ COLUMNS = [
     "timestamp", "t",
     # state
     "T_inside", "T_outside", "soc", "kwh_used",
-    # actions (what the player chose)
+    # actions
     "hvac", "battery", "pv_on",
     # prices & context
     "price", "occupancy", "comfort_penalty",
-    # metered/power terms (kW, signed as in charts)
+    # metered/power
     "pv_kw", "battery_kw", "hvac_kw", "other_kw", "total_kw",
-    # energy (kWh in step) and any extra signals
+    # energy & extras
     "electricity", "solar",
+    # --- NEW ---
+    "opex_cost", "reward",
 ]
 
 class GameRecorder:
