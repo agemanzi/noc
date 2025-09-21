@@ -1,23 +1,26 @@
 # -*- coding: utf-8 -*-
-import math
 import pandas as pd
 from .state import GameState, Action, StepResult
 
 COLUMNS = [
-    # time/state
-    "t","T_inside","T_outside","soc","kwh_used",
-    # actions
-    "hvac","battery","pv_on",
-    # engine metrics
-    "electricity","hvac_kw","battery_kw","pv_kw",
-    # placeholders / analytics
-    "price","occupancy","comfort_penalty"
+    # timing
+    "timestamp", "t",
+    # state
+    "T_inside", "T_outside", "soc", "kwh_used",
+    # actions (what the player chose)
+    "hvac", "battery", "pv_on",
+    # prices & context
+    "price", "occupancy", "comfort_penalty",
+    # metered/power terms (kW, signed as in charts)
+    "pv_kw", "battery_kw", "hvac_kw", "other_kw", "total_kw",
+    # energy (kWh in step) and any extra signals
+    "electricity", "solar",
 ]
 
 class GameRecorder:
     """
     Keeps a tidy pandas.DataFrame of the whole run.
-    Missing values are allowed and will be filled as features come online.
+    Columns are predeclared; missing values are fine and will be filled as features land.
     """
     def __init__(self):
         self.df = pd.DataFrame(columns=COLUMNS)
@@ -28,13 +31,36 @@ class GameRecorder:
             m.update(extra)
 
         def _get(name, default=None):
-            # pull from new state, metrics, or default
+            # prefer new state's attribute; otherwise metrics; otherwise default
             if hasattr(step.state, name):
                 return getattr(step.state, name)
             return m.get(name, default)
 
+        # signed convention (as used by charts):
+        #   pv_kw: + generation
+        #   battery_kw: + discharge to house, - charge from grid
+        #   hvac_kw: positive draw (charts negate internally)
+        #   other_kw: negative = load
+        pv_kw     = m.get("pv_kw")
+        batt_kw   = m.get("battery_kw")
+        hvac_kw   = m.get("hvac_kw")
+        other_kw  = m.get("other_kw")
+
+        # derive total_kw if not provided
+        total_kw = m.get("total_kw")
+        if total_kw is None:
+            try:
+                # charts compute TOTAL = pv + batt + (-hvac_kw) + other_kw
+                total_kw = float(pv_kw or 0.0) \
+                           + float(batt_kw or 0.0) \
+                           - float(hvac_kw or 0.0) \
+                           + float(other_kw or 0.0)
+            except Exception:
+                total_kw = None
+
         row = {
-            "t": step.state.t,
+            "timestamp": m.get("timestamp"),        # datetime if provided by GUI
+            "t": step.state.t,                      # seconds since start
             "T_inside": _get("T_inside"),
             "T_outside": _get("T_outside"),
             "soc": _get("soc"),
@@ -42,14 +68,18 @@ class GameRecorder:
             "hvac": getattr(action, "hvac", None),
             "battery": getattr(action, "battery", None),
             "pv_on": m.get("pv_on"),
-            "electricity": m.get("electricity"),
-            "hvac_kw": m.get("hvac_kw"),
-            "battery_kw": m.get("battery_kw"),
-            "pv_kw": m.get("pv_kw"),
             "price": m.get("price"),
             "occupancy": m.get("occupancy"),
             "comfort_penalty": m.get("comfort_penalty"),
+            "pv_kw": pv_kw,
+            "battery_kw": batt_kw,
+            "hvac_kw": hvac_kw,
+            "other_kw": other_kw,
+            "total_kw": total_kw,
+            "electricity": m.get("electricity"),
+            "solar": m.get("solar"),
         }
+
         self.df.loc[len(self.df)] = row
 
     def export_csv(self, path: str = "run.csv"):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
-
+from PIL import Image, ImageDraw
 
 import random
 import tkinter as tk
@@ -29,9 +29,9 @@ class App:
         load_csv    = data_dir / "load_profile.csv"
         self.feed = DataFeed(weather_csv, load_csv)
         #priont the paths:!
-        print("Using data files:")
-        print(f" Weather/price/solar: {weather_csv}")
-        print(f" Load profile:        {load_csv}")
+        # print("Using data files:")
+        # print(f" Weather/price/solar: {weather_csv}")
+        # print(f" Load profile:        {load_csv}")
         
 
         self.root = root
@@ -228,16 +228,18 @@ class App:
 
         # 2) data row for current sim time (t in seconds; dt=900 => 15 min)
         row = self.feed.by_time(self.state.t)
+        occupied = bool(row.occupied_home)
 
         # 3) inputs derived from data + settings
         price       = float(row.price_eur_per_kwh)
         T_outside   = float(row.t_out_c)
-        pv_kw       = (row.solar_gen_kw_per_kwp * self.settings.pv_size_kw) if self.pv_on.get() else 0.0
-        other_kw    = -float(row.base_load_kw)         # our charts expect loads negative
-        hvac_kw     = abs(self.settings.hvac_size_kw * float(self.hvac.get()))  # keep positive; charts negate
+        pv_kwp_yield = float(row.solar_gen_kw_per_kwp)            # kW per kWp (0..~1)
+        pv_kw       = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
+        other_kw    = -float(row.base_load_kw)                     # charts expect loads negative
+        hvac_kw     = abs(self.settings.hvac_size_kw * float(self.hvac.get()))  # positive; charts negate
         battery_kw  = int(self.bat.get()) * (self.settings.batt_size_kwh / 5.0) # toy mapping (+disch, -charge)
 
-        # 4) (optional) pass inputs into the engine if step(...) supports it
+        # 4) step the engine (supports new or legacy signature)
         try:
             step = self.engine.step(self.state, action, {
                 "ts": row.ts,
@@ -248,13 +250,18 @@ class App:
                 "hvac_kw": hvac_kw,
                 "battery_cmd": int(self.bat.get()),
                 "settings": self.settings,
+                "occupied_home": int(occupied),
             })
         except TypeError:
-            # legacy signature: keep the engine happy and just update Tout on state
             self.state.T_outside = T_outside
             step = self.engine.step(self.state, action)
 
-        # 5) post-step bookkeeping
+        # 5) UI: occupancy text + house overlay (simple night filter from solar)
+        self.occupancy_var.set("Occupied" if occupied else "Away")
+        night = 1.0 - max(0.0, min(1.0, pv_kwp_yield))  # daytime → 0, night → 1
+        self.draw_house(occupied=occupied, pv_on=self.pv_on.get(), night=night)
+
+        # 6) record (log *actual* occupancy from data)
         self.rec.append(self.state, action, step, extra={
             "timestamp": row.ts,
             "pv_on": self.pv_on.get(),
@@ -263,16 +270,16 @@ class App:
             "hvac_kw": hvac_kw,
             "battery_kw": battery_kw,
             "other_kw": other_kw,
-            "solar": pv_kw * 250.0,  # placeholder W/m² if you want a line; swap with real solar if available
-            "occupancy": 1,
-            "comfort_penalty": max(0.0, abs(step.state.T_inside - 22.0) - 1.0),
+            "solar": pv_kwp_yield * 1000.0,      # show as ~W/m²-like scale for weather plot
+            "occupancy": int(occupied),
+            "comfort_penalty": (0.0 if not occupied else max(0.0, abs(step.state.T_inside - 22.0) - 1.0)),
             "electricity": hvac_kw * (self.engine.dt / 3600.0),
         })
 
         # advance state
         self.state = step.state
 
-        # 6) badges/labels
+        # 7) badges/labels
         self.badge_hvac.config(text=f"HVAC {action.hvac:+.1f}")
         self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
                             bg=("#10b981" if self.pv_on.get() else "#6b7280"))
@@ -281,22 +288,40 @@ class App:
         self.out_vars["pv_gen"].set(f"{pv_kw:0.2f}")
         self.out_vars["batt_soc"].set(f"{self.state.soc:0.2f}")
 
-        # 7) charts (timestamp = CSV time; Tout from row to be explicit)
-        self.charts.update(step, {
+        # 8) charts: live point (+ occupancy)
+        metrics = {
             "timestamp": row.ts,
             "pv_kw": pv_kw,
             "battery_kw": battery_kw,
-            "hvac_kw": hvac_kw,          # charts negate to show as draw
+            "hvac_kw": hvac_kw,                # Charts will negate for draw
             "other_kw": other_kw,
             "price": price,
-            "solar": pv_kw * 250.0,
+            "solar": pv_kwp_yield * 1000.0,
             "T_outside": T_outside,
             "hvac_act": float(action.hvac),
             "batt_act": float(action.battery),
-        })
+            "occupied": int(occupied),         # <— NEW
+        }
 
-        # 8) status line
+        # If your Charts supports a future window, pass it (non-breaking try/except)
+        try:
+            fw = self.feed.window_by_time(self.state.t, horizon_steps=48)
+            metrics["forecast"] = {
+                "ts": fw.ts,
+                "t_out_c": fw.t_out_c,
+                "solar_per_kwp": fw.solar_gen_kw_per_kwp,
+                "price": fw.price_eur_per_kwh,
+                "base_kw": fw.base_load_kw,
+                "occupied": fw.occupied_home,
+            }
+        except Exception:
+            pass
+
+        self.charts.update(step, metrics)
+
+        # 9) status line
         self.status.config(text=f"Status: {row.ts:%Y-%m-%d %H:%M}  kWh={self.state.kwh_used:.3f}")
+
 
 
     def toggle_play(self):

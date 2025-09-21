@@ -1,3 +1,4 @@
+#therman_game/engine/physics.py
 def hvac_power_kw(hvac: float) -> float:
     # map -1..1 to cooling/heating power; sign -> direction, magnitude -> kW
     return 3.0 * max(-1.0, min(1.0, hvac))
