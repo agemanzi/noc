@@ -3,5 +3,6 @@
         "activityBar.background": "#2E2F0E",
         "titleBar.activeBackground": "#404214",
         "titleBar.activeForeground": "#FBFBF2"
-    }
+    },
+    "python-envs.pythonProjects": []
 }
