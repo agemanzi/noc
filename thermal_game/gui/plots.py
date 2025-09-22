@@ -10,18 +10,16 @@ import matplotlib as mpl
 
 class Charts:
     """
-    Dashboard charts:
-      1) Electricity profile: stacked areas for PV (+), Battery (+discharge/-charge),
-         HVAC (- draw), Other load (-), plus Total balance line.
-      2) Player actions: HVAC action & Battery action (-1..1) + Price on r-axis + Occupancy band.
-      3) T_inside: line with comfort band (tolerance).
-      4) Weather: T_outside (°C) + Solar (W/m^2) on twin axes.
-         (Optional forecast overlays for price/T_out/solar/occupancy when provided.)
+    Dashboard charts with triple reward lines on the T plot:
+      - reward_fin  (€/step)  : financial score
+      - reward_comf (€/step)  : comfort score (usually ≤ 0)
+      - reward      (€/step)  : total = fin + comf
     """
     def __init__(self, root, max_points=1200, comfort=(21.0, 23.0)):
         self.max_points = max_points
         self.comfort = comfort
-
+        self.occ_temp_style = "ribbon"   # or "hatch" or "dots"
+        self._occ_temp_artists = []      # holder for cleanup
         # live buffers
         self.buf = {
             "t": collections.deque(maxlen=max_points),
@@ -37,7 +35,12 @@ class Charts:
             "Tin": collections.deque(maxlen=max_points),
             "Tout": collections.deque(maxlen=max_points),
             "solar": collections.deque(maxlen=max_points),
+            # rewards (all €/step)
+            "reward_fin": collections.deque(maxlen=max_points),
+            "reward_comf": collections.deque(maxlen=max_points),
             "reward": collections.deque(maxlen=max_points),
+            #SOC
+            "soc": collections.deque(maxlen=max_points),
         }
 
         # figure & axes
@@ -52,10 +55,8 @@ class Charts:
         self.ax_price  = self.ax_actions.twinx()
         self.ax_solar  = self.ax_weather.twinx()
         self.ax_reward = self.ax_temp.twinx()
-        self.ax_reward.spines["right"].set_position(("axes", 1.10))
         self.ax_reward.set_frame_on(True)
         self.ax_reward.patch.set_visible(False)
-        # ensure reward ticks draw above temp axis
         self.ax_temp.set_zorder(2); self.ax_reward.set_zorder(3); self.ax_temp.patch.set_visible(False)
 
         # colors
@@ -66,19 +67,35 @@ class Charts:
             "total": palette[0], "pv": palette[1], "batt_pos": palette[2],
             "hvac": palette[3], "other": palette[4], "batt_chg": palette[5],
             "forecast": "#444444", "occ_band": "#94a3b8",
-            "solar_area": "#fbbf24", "comfort_band": "#60a5fa", "reward": "#1f2937",
+            "solar_area": "#fbbf24", "comfort_band": "#60a5fa",
+            # reward lines
+            "reward_fin": "#16a34a",    # green-ish
+            "reward_comf": "#ef4444",   # red-ish
+            "reward_tot": "#1f2937",    # dark gray
+            "soc": "#7c3aed",          # purple for SOC
         }
 
         # live lines
-        (self.l_total,)   = self.ax_elec.plot([], [], lw=2, color=self.colors["total"], label="_nolegend_", zorder=5)
-        (self.l_hvac_act,)= self.ax_actions.plot([], [], lw=1.8, label="HVAC action")
-        (self.l_batt_act,)= self.ax_actions.plot([], [], lw=1.2, label="Battery action")
-        (self.l_price,)   = self.ax_price.plot([], [], lw=1.5, color="green", label="Price")
-        (self.l_Tin,)     = self.ax_temp.plot([], [], lw=2, label="T_inside")
-        (self.l_reward,)  = self.ax_reward.plot([], [], lw=1.8, color=self.colors["reward"], label="Reward (€/step)")
+        (self.l_total,)    = self.ax_elec.plot([], [], lw=2, color=self.colors["total"], label="_nolegend_", zorder=5)
+        (self.l_hvac_act,) = self.ax_actions.plot([], [], lw=1.8, label="HVAC action")
+        (self.l_batt_act,) = self.ax_actions.plot([], [], lw=1.2, label="Battery action")
+        (self.l_price,)    = self.ax_price.plot([], [], lw=1.5, color="green", label="Price")
+        (self.l_Tin,)      = self.ax_temp.plot([], [], lw=2, label="T_inside")
+
+        (self.l_soc,)    = self.ax_actions.plot(
+            [], [], linestyle="--", alpha=0.8, lw=1.2,
+            color=self.colors["soc"], label="SOC (0..1)"
+        )
+
+
+        # reward lines on right axis (three of them)
+        (self.l_reward_fin,)  = self.ax_reward.plot([], [], lw=1.6, label="Financial", color=self.colors["reward_fin"])
+        (self.l_reward_comf,) = self.ax_reward.plot([], [], lw=1.6, label="Comfort",   color=self.colors["reward_comf"])
+        (self.l_reward_tot,)  = self.ax_reward.plot([], [], lw=2.0, label="Total",     color=self.colors["reward_tot"])
+
         (self.l_Tout,)    = self.ax_weather.plot([], [], lw=2, label="T_outside")
         (self.l_solar,)   = self.ax_solar.plot([], [], lw=1.6, linestyle="--",
-                                            color=self.colors["solar_area"], label="Solar (W/m²)")
+                                               color=self.colors["solar_area"], label="Solar (W/m²)")
         self._solar_fill = None
         self._temp_band  = None
         self._occ_fill   = None
@@ -108,7 +125,7 @@ class Charts:
         for ax in (self.ax_elec, self.ax_actions, self.ax_temp, self.ax_weather):
             ax.grid(True, alpha=0.25)
         self.ax_actions.set_ylim(-1.05, 1.05)
-        self.ax_temp.set_ylim(15, 25)
+        self.ax_temp.set_ylim(15, 30)
         self.ax_actions.set_ylabel("Action (-1..1)")
         self.ax_price.set_ylabel("Price (€/kWh)")
         self.ax_temp.set_ylabel("°C")
@@ -121,6 +138,7 @@ class Charts:
         self.ax_actions.legend(loc="upper left")
         self.ax_price.legend(loc="upper right")
         self.ax_temp.legend(loc="upper left")
+        self.ax_reward.legend(loc="upper right")
         self.ax_weather.legend(loc="upper left")
         self.ax_solar.legend(loc="upper right")
 
@@ -133,7 +151,6 @@ class Charts:
             ax.xaxis.set_major_formatter(fmt)
 
         self._elec_fills = []
-
 
     # --------------- public API ----------------------------------------------
     def update(self, step_or_state, metrics: dict):
@@ -152,28 +169,38 @@ class Charts:
         def nz(x):  # sanitize None -> nan, else float
             return np.nan if x is None else float(x)
 
-        # electricity pieces
+        # electricity pieces (chart convention)
         pv   = nz(metrics.get("pv_kw", 0.0))
         batt = nz(metrics.get("battery_kw", 0.0))
         hvac = -nz(metrics.get("hvac_kw", 0.0))   # store as negative draw
         other= nz(metrics.get("other_kw", 0.0))
         total = pv + batt + hvac + other
 
-        B["pv_kw"].append(pv)
-        B["batt_kw"].append(batt)
-        B["hvac_kw"].append(hvac)
-        B["other_kw"].append(other)
+        B["pv_kw"].append(pv); B["batt_kw"].append(batt)
+        B["hvac_kw"].append(hvac); B["other_kw"].append(other)
         B["total_kw"].append(total)
 
         B["hvac_act"].append(nz(metrics.get("hvac_act")))
         B["batt_act"].append(nz(metrics.get("batt_act")))
         B["price"].append(nz(metrics.get("price")))
         B["occupied"].append(nz(metrics.get("occupied")))
+        B["soc"].append(float(getattr(s, "soc", metrics.get("soc", np.nan))))
+
 
         B["Tin"].append(getattr(s, "T_inside", metrics.get("T_inside")))
         B["Tout"].append(metrics.get("T_outside", getattr(s, "T_outside", None)))
         B["solar"].append(metrics.get("solar"))
-        B["reward"].append(nz(metrics.get("reward")))
+
+        # rewards: accept either explicit values or fallbacks
+        # (fallback for fin: -net_opex; for comf: reward - fin)
+        r_tot = metrics.get("reward", np.nan)
+        r_fin = metrics.get("reward_fin", -float(metrics.get("net_opex", 0.0)) if r_tot is not np.nan else np.nan)
+        r_com = metrics.get("reward_comf",
+                            (float(r_tot) + float(metrics.get("net_opex", 0.0))) if r_tot is not np.nan else np.nan)
+
+        B["reward"].append(nz(r_tot))
+        B["reward_fin"].append(nz(r_fin))
+        B["reward_comf"].append(nz(r_com))
 
         # optional forecast payload
         self._forecast = metrics.get("forecast", None)
@@ -182,12 +209,10 @@ class Charts:
         self._draw_actions()
         self._draw_temperature()
         self._draw_weather()
-
         self.canvas.draw_idle()
 
     # --------------- drawers -------------------------------------------------
     def _draw_electricity(self):
-        # remove previous fills
         for poly in self._elec_fills:
             try: poly.remove()
             except Exception: pass
@@ -203,26 +228,18 @@ class Charts:
         other = np.asarray(self.buf["other_kw"],dtype=float)
         total = np.asarray(self.buf["total_kw"],dtype=float)
 
-        # battery split
-        batt_pos = np.clip(batt, 0, None)          # +discharge
-        batt_neg = -np.clip(batt, None, 0)         # charging magnitude as positive
+        batt_pos = np.clip(batt, 0, None)
+        batt_neg = -np.clip(batt, None, 0)
 
-        # positive stack (sources): PV + Battery discharge
-        s0 = np.zeros_like(t)
-        s1 = s0 + pv
-        s2 = s1 + batt_pos
-
-        # negative stack (loads): HVAC + Other + Battery charge
-        hvac_load  = -np.clip(hvac,  None, 0)      # make positive magnitudes
+        s0 = np.zeros_like(t); s1 = s0 + pv; s2 = s1 + batt_pos
+        hvac_load  = -np.clip(hvac,  None, 0)
         other_load = -np.clip(other, None, 0)
         batt_chg   = batt_neg
-
         l0 = np.zeros_like(t)
         l1 = -(l0 + hvac_load)
         l2 = -(hvac_load + other_load)
         l3 = -(hvac_load + other_load + batt_chg)
 
-        # stacked fills (fixed colors; no legend churn)
         self._elec_fills += [
             self.ax_elec.fill_between(t, s0, s1, alpha=0.35, color=self.colors["pv"],       label="_nolegend_"),
             self.ax_elec.fill_between(t, s1, s2, alpha=0.35, color=self.colors["batt_pos"], label="_nolegend_"),
@@ -230,14 +247,9 @@ class Charts:
             self.ax_elec.fill_between(t, l1, l2, alpha=0.35, color=self.colors["other"],    label="_nolegend_"),
             self.ax_elec.fill_between(t, l2, l3, alpha=0.35, color=self.colors["batt_chg"], label="_nolegend_"),
         ]
-
-        # total line
         self.l_total.set_data(t, total)
 
-        # autoscale to data first
         self.ax_elec.relim(); self.ax_elec.autoscale_view()
-
-        # ensure at least ±10 kW visible (don't shrink if data exceeded that)
         ymin, ymax = self.ax_elec.get_ylim()
         self.ax_elec.set_ylim(min(ymin, -10), max(ymax, 10))
 
@@ -245,128 +257,158 @@ class Charts:
         t = np.asarray(self.buf["t"], dtype=float)
         if t.size < 2:
             return
-
         hvac_act = np.asarray(self.buf["hvac_act"], dtype=float)
         batt_act = np.asarray(self.buf["batt_act"], dtype=float)
         price    = np.asarray(self.buf["price"], dtype=float)
-        occ      = np.asarray(self.buf["occupied"], dtype=float)  # 0/1
-
-        # series
+        occ      = np.asarray(self.buf["occupied"], dtype=float)
+        soc      = np.asarray(self.buf["soc"], dtype=float)  # NEW
         self.l_hvac_act.set_data(t, hvac_act)
         self.l_batt_act.set_data(t, batt_act)
         self.l_price.set_data(t, price)
-
-        # occupancy band at the bottom (-1.05..-0.95 when occupied)
+        self.l_soc.set_data(t, soc)  # NEW
         y0, y1 = -1.05, -0.95
-        # remove previous fills (if any)
         if self._occ_fill:
             try: self._occ_fill.remove()
             except Exception: pass
             self._occ_fill = None
-        # draw new live occupancy
-        self._occ_fill = self.ax_actions.fill_between(
-            t, y0, y1, where=(occ >= 0.5), alpha=0.25, color=self.colors["occ_band"], label="_nolegend_"
-        )
+        self._occ_fill = self.ax_actions.fill_between(t, y0, y1, where=(occ >= 0.5),
+                                                      alpha=0.25, color=self.colors["occ_band"],
+                                                      label="_nolegend_")
 
-        # forecast overlays (price + occ band)
         if self._forecast:
             try:
                 tf = mdates.date2num(np.asarray(self._forecast["ts"]))
             except Exception:
-                # if already numeric list:
                 tf = np.asarray(self._forecast.get("ts", []), dtype=float)
-
             price_f = np.asarray(self._forecast.get("price", []), dtype=float)
             occ_f   = np.asarray(self._forecast.get("occupied", []), dtype=float)
-
             self.l_price_fc.set_data(tf, price_f)
 
-            # occupancy forecast band
             if self._occ_fill_fc:
                 try: self._occ_fill_fc.remove()
                 except Exception: pass
                 self._occ_fill_fc = None
             if tf.size and occ_f.size:
-                self._occ_fill_fc = self.ax_actions.fill_between(
-                    tf, y0, y1, where=(occ_f >= 0.5), alpha=0.15, color=self.colors["occ_band"], label="_nolegend_"
-                )
+                self._occ_fill_fc = self.ax_actions.fill_between(tf, y0, y1, where=(occ_f >= 0.5),
+                                                                 alpha=0.15, color=self.colors["occ_band"],
+                                                                 label="_nolegend_")
         else:
-            # clear forecast lines if not provided
             self.l_price_fc.set_data([], [])
-
             if self._occ_fill_fc:
                 try: self._occ_fill_fc.remove()
                 except Exception: pass
                 self._occ_fill_fc = None
 
-        # axes scaling
         self.ax_actions.set_ylim(-1.05, 1.05)
         self.ax_actions.relim(); self.ax_actions.autoscale_view(scalex=True, scaley=False)
         self.ax_price.relim();   self.ax_price.autoscale_view(scalex=True, scaley=True)
 
-        # x formatting (already set in __init__, but safe)
-        self.ax_actions.xaxis.set_major_locator(mdates.AutoDateLocator())
-        self.ax_actions.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
     def _draw_temperature(self):
         t = np.asarray(self.buf["t"], dtype=float)
         if t.size < 2:
             return
 
-        Tin    = np.asarray(self.buf["Tin"],    dtype=float)
-        reward = np.asarray(self.buf["reward"], dtype=float)
+        # Buffers
+        Tin  = np.asarray(self.buf["Tin"],          dtype=float)
+        r_fin= np.asarray(self.buf["reward_fin"],   dtype=float)
+        r_com= np.asarray(self.buf["reward_comf"],  dtype=float)
+        r_tot= np.asarray(self.buf["reward"],       dtype=float)
+        occ  = np.asarray(self.buf["occupied"],     dtype=float)
 
-        # align temp
-        n = min(t.size, Tin.size)
+        # Align series by time length
+        n  = min(t.size, Tin.size)
         tt, Tin_t = t[-n:], Tin[-n:]
         self.l_Tin.set_data(tt, Tin_t)
 
-        # comfort band
+        # --- keep one-time attrs safe
+        if not hasattr(self, "_occ_fill_temp"):
+            self._occ_fill_temp = None
+        if not hasattr(self, "_styled_reward_lines"):
+            self._styled_reward_lines = False
+        if not hasattr(self, "occ_temp_expand"):
+            self.occ_temp_expand = 1.0  # °C widen vs comfort band
+
+        # --- occupancy band (slightly bigger than comfort band)
         lo, hi = self.comfort
-        if self._temp_band:
+        band_lo = lo - float(self.occ_temp_expand)
+        band_hi = hi + float(self.occ_temp_expand)
+
+        if self._occ_fill_temp:
+            try: self._occ_fill_temp.remove()
+            except Exception: pass
+            self._occ_fill_temp = None
+
+        if n > 0 and occ.size:
+            occ_t = occ[-n:]  # align with tt
+            self._occ_fill_temp = self.ax_temp.fill_between(
+                tt, band_lo, band_hi, where=(occ_t >= 0.5),
+                alpha=0.22, color=self.colors["occ_band"], edgecolor="none",
+                label="_nolegend_", zorder=0.3
+            )
+
+        # --- comfort band (draw above occ band)
+        if getattr(self, "_temp_band", None):
             try: self._temp_band.remove()
             except Exception: pass
             self._temp_band = None
+
         if n > 0:
             self._temp_band = self.ax_temp.fill_between(
                 tt, lo, hi, alpha=0.18, facecolor=self.colors["comfort_band"],
-                edgecolor="none", label="_nolegend_", zorder=0
+                edgecolor="none", label="_nolegend_", zorder=0.4
             )
 
-        # reward (only if data exists)
-        nr = min(t.size, reward.size)
-        if nr > 0:
-            tr, rr = t[-nr:], reward[-nr:]
-            self.l_reward.set_data(tr, rr)
-        else:
-            self.l_reward.set_data([], [])
+        # --- reward lines (right axis)
+        if not self._styled_reward_lines:
+            for ln in (self.l_reward_fin, self.l_reward_comf, self.l_reward_tot):
+                ln.set_linestyle("--")
+                ln.set_linewidth(1.2)
+                ln.set_alpha(0.8)
+            self._styled_reward_lines = True
 
-        # autoscale
-        self.ax_temp.relim(); self.ax_temp.autoscale_view(scalex=True, scaley=True)
+        def _set_series(line, series):
+            k = min(t.size, series.size)
+            if k > 0:
+                line.set_data(t[-k:], series[-k:])
+            else:
+                line.set_data([], [])
+
+        _set_series(self.l_reward_fin,  r_fin)
+        _set_series(self.l_reward_comf, r_com)
+        _set_series(self.l_reward_tot,  r_tot)
+
+        # --- autoscale
+        self.ax_temp.relim();    self.ax_temp.autoscale_view(scalex=True,  scaley=True)
         ymin, ymax = self.ax_temp.get_ylim()
-        self.ax_temp.set_ylim(min(ymin, 15.0), max(ymax, 25.0))
-        if nr > 0:
-            self.ax_reward.relim(); self.ax_reward.autoscale_view(scalex=True, scaley=True)
+        self.ax_temp.set_ylim(min(ymin, 15.0), max(ymax, 30.0))
 
-        # time axis (kept explicit for stability)
-        self.ax_temp.xaxis.set_major_locator(mdates.AutoDateLocator())
-        self.ax_temp.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
+        self.ax_reward.relim();  self.ax_reward.autoscale_view(scalex=True, scaley=True)
+
+        # --- legends
+        self.ax_temp.legend(loc="upper left")
+        self.ax_reward.legend(loc="upper right")
+
+        # --- time axis formatting
+        locator = mdates.AutoDateLocator()
+        formatter = mdates.ConciseDateFormatter(locator)
+        self.ax_temp.xaxis.set_major_locator(locator)
+        self.ax_temp.xaxis.set_major_formatter(formatter)
+        self.ax_reward.xaxis.set_major_locator(locator)
+        self.ax_reward.xaxis.set_major_formatter(formatter)
+
 
     def _draw_weather(self):
         t = np.asarray(self.buf["t"], dtype=float)
         if t.size < 2:
             return
 
-        Tout   = np.asarray(self.buf["Tout"],   dtype=float)
-        solar  = np.asarray(self.buf["solar"],  dtype=float)
+        Tout  = np.asarray(self.buf["Tout"],  dtype=float)
+        solar = np.asarray(self.buf["solar"], dtype=float)
 
-        # Keep arrays aligned: trim to common length for plotting
-        # (This avoids shape mismatch on first few frames.)
         n = min(t.size, Tout.size)
         tt, TT = t[-n:], Tout[-n:]
-
         self.l_Tout.set_data(tt, TT)
 
-        # solar line + area
         ns = min(t.size, solar.size)
         t_s, s_s = t[-ns:], solar[-ns:]
         self.l_solar.set_data(t_s, s_s)
@@ -376,29 +418,21 @@ class Charts:
             except Exception: pass
             self._solar_fill = None
         if ns > 0:
-            self._solar_fill = self.ax_solar.fill_between(
-                t_s, 0.0, s_s, alpha=0.25, color=self.colors["solar_area"], label="_nolegend_"
-            )
+            self._solar_fill = self.ax_solar.fill_between(t_s, 0.0, s_s, alpha=0.25,
+                                                          color=self.colors["solar_area"], label="_nolegend_")
 
-        # forecast overlays for weather (Tout + Solar)
         if self._forecast:
             try:
                 tf = mdates.date2num(np.asarray(self._forecast["ts"]))
             except Exception:
                 tf = np.asarray(self._forecast.get("ts", []), dtype=float)
-
             Tout_f  = np.asarray(self._forecast.get("t_out_c", []), dtype=float)
-            solar_f = np.asarray(self._forecast.get("solar_per_kwp", []), dtype=float) * 1000.0  # to W/m²-ish
-
+            solar_f = np.asarray(self._forecast.get("solar_per_kwp", []), dtype=float) * 1000.0
             self.l_Tout_fc.set_data(tf, Tout_f)
             self.l_solar_fc.set_data(tf, solar_f)
         else:
             self.l_Tout_fc.set_data([], [])
             self.l_solar_fc.set_data([], [])
 
-        # autoscale weather and solar axes
         self.ax_weather.relim(); self.ax_weather.autoscale_view(scalex=True, scaley=True)
         self.ax_solar.relim();   self.ax_solar.autoscale_view(scalex=True, scaley=True)
-        
-        self.ax_weather.xaxis.set_major_locator(mdates.AutoDateLocator())
-        self.ax_weather.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))

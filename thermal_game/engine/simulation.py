@@ -1,7 +1,8 @@
+#path: thermal_game/engine/simulation.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from typing import Dict, Optional
 import numpy as np
 
@@ -42,7 +43,7 @@ class SimulationEngine:
     # Controller defaults
     Tin_set_C: float = 22.0         # comfort setpoint
     ctrl_aggr: float = 0.35         # 0..1, how aggressively we chase the setpoint this step
-
+    reward_cfg: RewardConfig = field(default_factory=RewardConfig)
     @property
     def dt_h(self) -> float:
         return float(self.dt) / 3600.0
@@ -195,6 +196,7 @@ class SimulationEngine:
         """
         inputs = inputs or {}
         settings: GameSettings = inputs.get("settings") or GameSettings()
+        cfg: RewardConfig = inputs.get("reward_cfg", self.reward_cfg)
 
         # exogenous
         T_out = float(inputs.get("T_outside", getattr(prev, "T_outside", 15.0)))
@@ -262,10 +264,14 @@ class SimulationEngine:
         soc_next   = batt["soc_next"]
 
         # Electrical balance in chart convention
-        other_kw = -base_load_kw
+        other_kw = -base_load_kw                       # charts expect loads negative
         total_kw = pv_kw + battery_kw + (-hvac_kw) + other_kw
-        grid_import_kw = max(0.0, total_kw)
-        kwh_from_grid = grid_import_kw * self.dt_h
+
+        # split into import/export and convert to kWh for this step
+        grid_import_kw = max(0.0,  total_kw)
+        grid_export_kw = max(0.0, -total_kw)
+        import_kwh = grid_import_kw * self.dt_h
+        export_kwh = grid_export_kw * self.dt_h
 
         # Thermal update (optional gains)
         q_solar_kw = float(inputs.get("q_solar_kw", 0.0))
@@ -279,8 +285,10 @@ class SimulationEngine:
         reward_bits = step_reward(
             Tin_C=T_in_next,
             occupied=occupied,
-            grid_kwh=kwh_from_grid,
-            price_eur_per_kwh=price
+            import_kwh=import_kwh,
+            export_kwh=export_kwh,
+            price_eur_per_kwh=price,
+            cfg=cfg,                    # ✅ use the cfg here
         )
 
         # --- If your GameState does NOT have ts/occupied fields, use this simpler replace: ---
@@ -290,7 +298,9 @@ class SimulationEngine:
             T_inside=T_in_next,
             T_outside=T_out,
             soc=soc_next,
-            kwh_used=float(prev.kwh_used) + kwh_from_grid,
+            kwh_used=float(prev.kwh_used) + import_kwh,   # cumulative import
+            ts=inputs.get("ts", getattr(prev, "ts", None)),
+            occupied=int(inputs.get("occupied_home", getattr(prev, "occupied", 0) or 0)),
         )
 
         metrics = {
@@ -303,24 +313,37 @@ class SimulationEngine:
             "total_kw": total_kw,
             "electricity": hvac_kw * self.dt_h,
             "price": price,
+
             # HVAC introspection
             "hvac_cop": hv["cop"],
             "hvac_cop_carnot": hv["cop_carnot"],
             "hvac_T_source_C": hv["T_source_C"],
             "hvac_T_sink_C": hv["T_sink_C"],
-            # diagnostics (now always defined)
+
+            # diagnostics
             "q_need_kw": q_need_kw,
             "q_env_kw": q_env_kw,
             "q_hvac_kw": q_hvac_kw,
+
             # thermal diag
             "q_cond_kw": therm_diag["q_cond_kw"],
             "q_solar_kw": therm_diag["q_solar_kw"],
             "q_internal_kw": therm_diag["q_internal_kw"],
             "q_net_kw": therm_diag["q_net_kw"],
-            # reward metrics
-            "comfort_penalty": reward_bits["comfort_penalty"],
-            "opex_cost": reward_bits["opex_cost"],
-            "reward": reward_bits["reward"],
+
+            # economics / rewards (now split)
+            "comfort_penalty":  reward_bits["comfort_penalty"],
+            "import_kwh":       import_kwh,
+            "export_kwh":       export_kwh,
+            "import_cost":      reward_bits["import_cost"],
+            "export_credit":    reward_bits["export_credit"],
+            "net_opex":         reward_bits["net_opex"],
+
+            # new fields:
+            "reward_fin":       reward_bits["financial_score"],
+            "reward_comf":      reward_bits["comfort_score"],
+            "reward":           reward_bits["reward_total"],  # total (back-compat)
+            "opex_cost":        reward_bits["net_opex"],      # back-compat alias
         }
         
         return StepResult(state=state, metrics=metrics)

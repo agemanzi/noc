@@ -1,16 +1,19 @@
+# thermal_game/engine/reward.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class RewardConfig:
     # comfort
     comfort_target_C: float = 22.0
-    comfort_tolerance_C: float = 1.0          # no penalty within ±tol
-    comfort_weight: float = 0.5               # €/ (°C over tol)^2 per step
+    comfort_tolerance_C: float = 1.0
+    # NOTE: units are €/deg²·step (the GUI converts from €/deg²·hour via dt_h)
+    comfort_weight: float = 0.5
 
     # tariffs
-    export_tariff_ratio: float = 0.4          # export gets 40% of spot by default
+    export_tariff_ratio: float = 0.4  # export gets 40% of spot by default
 
 def comfort_penalty(T_in: float, occupied: int,
                     target_C: float, tol_C: float) -> float:
@@ -37,16 +40,32 @@ def step_reward(*,
                 import_kwh: float,
                 export_kwh: float,
                 price_eur_per_kwh: float,
-                cfg: RewardConfig = RewardConfig()) -> dict:
+                cfg: Optional[RewardConfig] = None) -> dict:
     """
-    Returns a dict with:
-      comfort_penalty, import_cost, export_credit, net_opex, reward
-    Convention: reward = +export_credit - import_cost - comfort_weight * comfort_penalty
-               = -net_opex - comfort_weight * comfort_penalty
+    Returns: comfort_penalty, import_cost, export_credit, net_opex,
+             comfort_score, financial_score, reward_total, reward(=alias)
+
+    Conventions (higher is better):
+      financial_score = +export_credit - import_cost = -net_opex
+      comfort_score   = -comfort_weight * comfort_penalty
+      reward_total    = financial_score + comfort_score
     """
+    cfg = cfg or RewardConfig()  # safe default (new instance)
+
     cpen = comfort_penalty(Tin_C, occupied, cfg.comfort_target_C, cfg.comfort_tolerance_C)
     terms = opex_terms(import_kwh, export_kwh,
                        import_price=price_eur_per_kwh,
                        export_price=price_eur_per_kwh * cfg.export_tariff_ratio)
-    reward = -terms["net_opex"] - cfg.comfort_weight * cpen
-    return {**terms, "comfort_penalty": cpen, "reward": reward}
+
+    financial_score = -terms["net_opex"]
+    comfort_score   = -cfg.comfort_weight * cpen
+    reward_total    = financial_score + comfort_score
+
+    return {
+        **terms,
+        "comfort_penalty": cpen,
+        "financial_score": financial_score,
+        "comfort_score":   comfort_score,
+        "reward_total":    reward_total,
+        "reward":          reward_total,  # back-compat alias
+    }

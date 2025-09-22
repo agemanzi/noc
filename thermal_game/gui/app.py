@@ -12,7 +12,8 @@ from ..engine.simulation import SimulationEngine
 from ..engine.recorder import GameRecorder
 from ..engine.settings import GameSettings
 from ..engine.datafeed import DataFeed
-from ..engine.reward import step_reward, RewardConfig
+from ..engine.reward import RewardConfig
+
 
 import datetime as dt
 
@@ -63,11 +64,18 @@ class App:
         self._build_left()
 
         # --- RIGHT: Charts ----------------------------------------------------
-        self.charts = Charts(self.right)
+        # self.charts = Charts(self.right)
 
         # --- Controls ---------------------------------------------------------
         self._build_controls()
 
+        # Use settings for both rewards and plotting
+        self.reward_cfg = self._mk_reward_cfg_from_settings()
+        # Charts: set comfort band from settings (target ± tol)
+        lo = self.settings.comfort_target_C - self.settings.comfort_tolerance_C
+        hi = self.settings.comfort_target_C + self.settings.comfort_tolerance_C
+        self.charts = Charts(self.right, comfort=(lo, hi))        
+        
         # play/pause
         self.playing = False
         self._tick_after_id = None
@@ -90,6 +98,7 @@ class App:
         self.root.bind("<KeyRelease-Left>",  self._hvac_hold_stop)
         self.root.bind("<KeyRelease-Right>", self._hvac_hold_stop)
 
+        
 
     # --------- LEFT SIDE -----------------------------------------------------
     def _badge(self, parent, text, bg):
@@ -192,7 +201,9 @@ class App:
             "hvac_heat": "HVAC Heat/Cool (kW)",
             "pv_gen": "PV Generation (kW)",
             "batt_soc": "Battery SOC",
-            "reward": "Reward (€/step)",
+            "reward_fin": "Financial score (€/step)",
+            "reward_comf": "Comfort score (€/step)",
+            "reward": "Total reward (€/step)",
         }
         self.out_vars = {k: tk.StringVar(value="–") for k in labels}
         r = 0
@@ -235,9 +246,9 @@ class App:
         # Battery radio group (in a small frame)
         bat_frame = ttk.Frame(self.controls)
         bat_frame.grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Radiobutton(bat_frame, text="Discharge", value=-1, variable=self.bat).grid(row=0, column=0, padx=2)
+        ttk.Radiobutton(bat_frame, text="Charge", value=-1, variable=self.bat).grid(row=0, column=0, padx=2)
         ttk.Radiobutton(bat_frame, text="Idle",       value= 0, variable=self.bat).grid(row=0, column=1, padx=2)
-        ttk.Radiobutton(bat_frame, text="Charge",     value= 1, variable=self.bat).grid(row=0, column=2, padx=2)
+        ttk.Radiobutton(bat_frame, text="Discharge",     value= 1, variable=self.bat).grid(row=0, column=2, padx=2)
         ttk.Label(self.controls, text="Battery (-1/0/+1)").grid(row=1, column=1)
 
         # PV toggle
@@ -258,6 +269,7 @@ class App:
 
 
     # --------- LOOP ----------------------------------------------------------
+    # --------- LOOP ----------------------------------------------------------
     def step_once(self):
         # 1) user action at this tick
         action = Action(hvac=self.hvac.get(), battery=int(self.bat.get()))
@@ -267,17 +279,17 @@ class App:
         occupied = bool(row.occupied_home)
 
         # 3) inputs derived from data + settings
-        price       = float(row.price_eur_per_kwh)
-        T_outside   = float(row.t_out_c)
-        pv_kwp_yield = float(row.solar_gen_kw_per_kwp)            # kW per kWp (0..~1)
-        pv_kw = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
-        base_load_kw = float(row.base_load_kw)  # positive consumption
+        price         = float(row.price_eur_per_kwh)
+        T_outside     = float(row.t_out_c)
+        pv_kwp_yield  = float(row.solar_gen_kw_per_kwp)            # kW per kWp (0..~1)
+        pv_kw         = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
+        base_load_kw  = float(row.base_load_kw)  # positive consumption
 
         # Optional simple gains
-        q_internal_kw = 0.7 if occupied else 0.3      # tweak as you like
-        q_solar_kw    = 0.0                            # start at 0 (or small factor * pv_kwp_yield)
+        q_internal_kw = 0.7 if occupied else 0.3
+        q_solar_kw    = 0.0
 
-        # 4) step the engine (supports new or legacy signature)
+        # 4) step the engine
         try:
             step = self.engine.step(self.state, action, {
                 "ts": row.ts,
@@ -290,71 +302,50 @@ class App:
                 "occupied_home": int(occupied),
                 "q_internal_kw": q_internal_kw,
                 "q_solar_kw": q_solar_kw,
+                "reward_cfg": self.reward_cfg,   # <-- important
             })
         except TypeError:
+            # legacy engine signature fallback
             self.state.T_outside = T_outside
             step = self.engine.step(self.state, action)
 
-        # Now pull all powers from step.metrics (single source of truth):
+        # 5) read metrics once
         m = step.metrics
-        hvac_kw    = float(m.get("hvac_kw", 0.0))       # (+) electric draw
-        battery_kw = float(m.get("battery_kw", 0.0))    # (+) discharge, (−) charge
-        other_kw   = float(m.get("other_kw", 0.0))      # (−) load for chart convention
+        hvac_kw    = float(m.get("hvac_kw", 0.0))        # (+) electric draw
+        battery_kw = float(m.get("battery_kw", 0.0))     # (+) discharge, (−) charge
+        other_kw   = float(m.get("other_kw", 0.0))       # (−) load for chart convention
         pv_kw      = float(m.get("pv_kw", pv_kw))
         total_kw   = float(m.get("total_kw", pv_kw + battery_kw - hvac_kw + other_kw))
-        elec_kwh   = float(m.get("electricity", 0.0))   # energy for this step
+        elec_kwh   = float(m.get("electricity", 0.0))    # energy for this step
 
-        # --- reward (cost + comfort) ---
-        dt_h = self.engine.dt / 3600.0
-        grid_import_kw = max(0.0, total_kw)              # positive = import from grid
-        kwh_from_grid  = grid_import_kw * dt_h
-        opex_eur       = price * kwh_from_grid           # cost this step
+        # 6) reward components (compute FIRST)
+        reward_tot  = float(m.get("reward", 0.0))
+        net_opex    = float(m.get("net_opex", m.get("opex_cost", 0.0)))  # compatibility
+        reward_fin  = float(m.get("reward_fin", -net_opex))               # financial = -net_opex
+        reward_comf = float(m.get("reward_comf", reward_tot - reward_fin))# comfort = total - financial
 
-        comfort_penalty = (0.0 if not occupied
-                           else max(0.0, abs(step.state.T_inside - 22.0) - 1.0))  # °C outside 21–23
-        lambda_c = 0.5                                   # tune weight (€/°C-step)
-        reward = -(opex_eur + lambda_c * comfort_penalty)
-
-        # show in UI
-        self.out_vars["reward"].set(f"{reward:+.3f}")
-
-        # 5) UI: occupancy text + house overlay (simple night filter from solar)
+        # 7) occupancy text + house overlay
         self.occupancy_var.set("Occupied" if occupied else "Away")
         night = 1.0 - max(0.0, min(1.0, pv_kwp_yield))  # daytime → 0, night → 1
         self.draw_house(occupied=occupied, pv_on=self.pv_on.get(), night=night)
 
-        # 6) record (log *actual* occupancy from data)
-        self.rec.append(self.state, action, step, extra={
-            "timestamp": row.ts,
-            "pv_on": self.pv_on.get(),
-            "pv_kw": pv_kw,
-            "price": price,
-            "hvac_kw": hvac_kw,
-            "battery_kw": battery_kw,
-            "other_kw": other_kw,
-            "total_kw": total_kw,
-            "solar": pv_kwp_yield * 1000.0,
-            "occupancy": int(occupied),
-            "comfort_penalty": comfort_penalty,
-            "electricity": elec_kwh,  # <-- use engine value, not hvac_kw*dt
-            "reward": reward,
-        })
-
-        # advance state
+        # 8) advance state before showing SOC
         self.state = step.state
 
-        # 7) badges/labels
+        # 9) badges/labels (now safe to use reward_* and new SOC)
         self.badge_hvac.config(text=f"HVAC {action.hvac:+.1f}")
         self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
                             bg=("#10b981" if self.pv_on.get() else "#6b7280"))
         self.badge_bat.config(text=f"Batt {int(self.state.soc*100):d}%")
-        self.out_vars["hvac_heat"].set(f"{hvac_kw:0.2f}")   # this is electric draw (label text can be renamed later)
+
+        self.out_vars["hvac_heat"].set(f"{hvac_kw:0.2f}")  # electric draw (kW)
         self.out_vars["pv_gen"].set(f"{pv_kw:0.2f}")
         self.out_vars["batt_soc"].set(f"{self.state.soc:0.2f}")
-        self.out_vars["reward"].set(f"{m.get('reward', 0.0):+.3f}")
+        self.out_vars["reward_fin"].set(f"{reward_fin:+.3f}")
+        self.out_vars["reward_comf"].set(f"{reward_comf:+.3f}")
+        self.out_vars["reward"].set(f"{reward_tot:+.3f}")
 
-        # 8) charts: live point (+ occupancy)
-        # If your Charts supports a future window, pass it (non-breaking try/except)
+        # 10) optional forecast (build BEFORE charts.update)
         try:
             fw = self.feed.window_by_time(self.state.t, horizon_steps=48)
             forecast_data = {
@@ -368,6 +359,7 @@ class App:
         except Exception:
             forecast_data = None
 
+        # 11) one charts.update call with everything
         self.charts.update(step, {
             "timestamp": row.ts,
             "pv_kw": pv_kw,
@@ -380,12 +372,16 @@ class App:
             "hvac_act": float(action.hvac),
             "batt_act": float(action.battery),
             "occupied": int(occupied),
-            "reward": reward,
-            # keep passing forecast if you have it
+
+            # reward channels
+            "reward_fin": reward_fin,
+            "reward_comf": reward_comf,
+            "reward":     reward_tot,
+
             "forecast": forecast_data,
         })
 
-        # 9) status line
+        # 12) status line
         self.status.config(text=f"Status: {row.ts:%Y-%m-%d %H:%M}  kWh={self.state.kwh_used:.3f}")
 
 
@@ -421,43 +417,92 @@ class App:
         self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
                              bg=("#10b981" if self.pv_on.get() else "#6b7280"))
 
+    def _mk_reward_cfg_from_settings(self) -> RewardConfig:
+        # Translate anchor (€/deg²·hour) to per-step (€/deg²·step)
+        cw = float(self.settings.comfort_anchor_eur_per_deg2_hour) * self.engine.dt_h
+        return RewardConfig(
+            comfort_target_C    = self.settings.comfort_target_C,
+            comfort_tolerance_C = self.settings.comfort_tolerance_C,
+            comfort_weight      = cw,  # derived!
+            export_tariff_ratio = self.settings.export_tariff_ratio,
+        )
 
     def open_settings(self):
         win = tk.Toplevel(self.root)
         win.title("Game Settings")
-        win.grab_set()  # modal
+        win.grab_set()
 
-        # local vars bound to entries
         pv_var   = tk.DoubleVar(value=self.settings.pv_size_kw)
         hvac_var = tk.DoubleVar(value=self.settings.hvac_size_kw)
         batt_var = tk.DoubleVar(value=self.settings.batt_size_kwh)
         date_var = tk.StringVar(value=self.settings.start_date.isoformat())
 
-        # layout
-        ttk.Label(win, text="PV size (kW)").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(win, textvariable=pv_var).grid(row=0, column=1, padx=6, pady=4)
+        # NEW comfort/econ vars
+        ctgt_var = tk.DoubleVar(value=self.settings.comfort_target_C)
+        ctol_var = tk.DoubleVar(value=self.settings.comfort_tolerance_C)
+        cwgt_var = tk.DoubleVar(value=self.settings.comfort_weight)
+        xrt_var  = tk.DoubleVar(value=self.settings.export_tariff_ratio)
 
-        ttk.Label(win, text="HVAC size (kW)").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(win, textvariable=hvac_var).grid(row=1, column=1, padx=6, pady=4)
+        anchor_var = tk.DoubleVar(value=self.settings.comfort_anchor_eur_per_deg2_hour)
 
-        ttk.Label(win, text="Battery size (kWh)").grid(row=2, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(win, textvariable=batt_var).grid(row=2, column=1, padx=6, pady=4)
+        r = 0
+        ttk.Label(win, text="PV size (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=pv_var).grid(row=r-1, column=1, padx=6, pady=4)
 
-        ttk.Label(win, text="Start date (YYYY-MM-DD)").grid(row=3, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(win, textvariable=date_var).grid(row=3, column=1, padx=6, pady=4)
+        ttk.Label(win, text="HVAC size (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=hvac_var).grid(row=r-1, column=1, padx=6, pady=4)
+
+        ttk.Label(win, text="Battery size (kWh)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=batt_var).grid(row=r-1, column=1, padx=6, pady=4)
+
+        ttk.Label(win, text="Start date (YYYY-MM-DD)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=date_var).grid(row=r-1, column=1, padx=6, pady=4)
+
+        # NEW: comfort & tariff
+        ttk.Label(win, text="Comfort target (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=ctgt_var).grid(row=r-1, column=1, padx=6, pady=4)
+
+        ttk.Label(win, text="Comfort tolerance (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=ctol_var).grid(row=r-1, column=1, padx=6, pady=4)
+
+        ttk.Label(win, text="Comfort weight (€/step)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=cwgt_var).grid(row=r-1, column=1, padx=6, pady=4)
+
+        ttk.Label(win, text="Export tariff ratio (0..1)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=xrt_var).grid(row=r-1, column=1, padx=6, pady=4)
+
+        # UI rows (labels + entries)
+        ttk.Label(win, text="Comfort price (€/deg²·hour)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
+        ttk.Entry(win, textvariable=anchor_var).grid(row=r-1, column=1, padx=6, pady=4)
 
         def save_and_close():
             import datetime as dt
-            self.settings.pv_size_kw   = pv_var.get()
-            self.settings.hvac_size_kw = hvac_var.get()
-            self.settings.batt_size_kwh= batt_var.get()
+            self.settings.pv_size_kw    = pv_var.get()
+            self.settings.hvac_size_kw  = hvac_var.get()
+            self.settings.batt_size_kwh = batt_var.get()
             try:
                 self.settings.start_date = dt.date.fromisoformat(date_var.get())
             except ValueError:
-                pass  # keep old if parse fails
+                pass
+
+            # NEW: save comfort/tariff
+            self.settings.comfort_target_C    = ctgt_var.get()
+            self.settings.comfort_tolerance_C = ctol_var.get()
+            self.settings.comfort_weight      = cwgt_var.get()
+            self.settings.export_tariff_ratio = xrt_var.get()
+            self.settings.comfort_anchor_eur_per_deg2_hour = anchor_var.get()
+            # Rebuild reward cfg and refresh chart comfort band
+            self.reward_cfg = self._mk_reward_cfg_from_settings()
+            lo = self.settings.comfort_target_C - self.settings.comfort_tolerance_C
+            hi = self.settings.comfort_target_C + self.settings.comfort_tolerance_C
+
+            
+            self.charts.comfort = (lo, hi)           # applied on next draw
+
             win.destroy()
 
-        ttk.Button(win, text="Save", command=save_and_close).grid(row=4, column=0, columnspan=2, pady=8)
+        ttk.Button(win, text="Save", command=save_and_close).grid(row=r, column=0, columnspan=2, pady=8)
+
 
     # --- HVAC auto-repeat helpers --------------------------------------------
     def _clamp(self, x, lo=-1.0, hi=1.0):  # reuse anywhere
