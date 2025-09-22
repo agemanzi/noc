@@ -320,33 +320,71 @@ class Charts:
         tt, Tin_t = t[-n:], Tin[-n:]
         self.l_Tin.set_data(tt, Tin_t)
 
-        # --- keep one-time attrs safe
-        if not hasattr(self, "_occ_fill_temp"):
-            self._occ_fill_temp = None
+        # One-time attrs
         if not hasattr(self, "_styled_reward_lines"):
             self._styled_reward_lines = False
         if not hasattr(self, "occ_temp_expand"):
             self.occ_temp_expand = 1.0  # °C widen vs comfort band
 
-        # --- occupancy band (slightly bigger than comfort band)
+        # --- OCCUPANCY CUE ON Tin AXIS -------------------------------------------
+        # cleanup previous artists
+        for art in getattr(self, "_occ_temp_artists", []):
+            try: art.remove()
+            except Exception: pass
+        self._occ_temp_artists = []
+
         lo, hi = self.comfort
         band_lo = lo - float(self.occ_temp_expand)
         band_hi = hi + float(self.occ_temp_expand)
 
-        if self._occ_fill_temp:
-            try: self._occ_fill_temp.remove()
-            except Exception: pass
-            self._occ_fill_temp = None
+        occ_t = occ[-n:] if occ.size else np.array([])
 
-        if n > 0 and occ.size:
-            occ_t = occ[-n:]  # align with tt
-            self._occ_fill_temp = self.ax_temp.fill_between(
-                tt, band_lo, band_hi, where=(occ_t >= 0.5),
-                alpha=0.22, color=self.colors["occ_band"], edgecolor="none",
-                label="_nolegend_", zorder=0.3
-            )
+        if occ_t.size:
+            if self.occ_temp_style == "ribbon":
+                # thin ribbon near the top of the axis
+                ymin, ymax = self.ax_temp.get_ylim()
+                span = ymax - ymin if ymax > ymin else 1.0
+                y0 = ymax - 0.10 * span
+                y1 = ymax - 0.03 * span
+                band = self.ax_temp.fill_between(
+                    tt, y0, y1, where=(occ_t >= 0.5),
+                    alpha=0.25, color=self.colors["occ_band"], edgecolor="none",
+                    zorder=0.25, label="_nolegend_"
+                )
+                self._occ_temp_artists.append(band)
 
-        # --- comfort band (draw above occ band)
+            elif self.occ_temp_style == "hatch":
+                # hatch overlay only where occupied, on top of comfort band
+                hatch = self.ax_temp.fill_between(
+                    tt, band_lo, band_hi, where=(occ_t >= 0.5),
+                    facecolor="none", edgecolor=self.colors["occ_band"],
+                    hatch="////", linewidth=0.0, alpha=0.35,
+                    zorder=0.35, label="_nolegend_"
+                )
+                self._occ_temp_artists.append(hatch)
+
+            elif self.occ_temp_style == "dots":
+                # dot rail slightly above axis bottom
+                ymin, ymax = self.ax_temp.get_ylim()
+                rail_y = ymin + 0.06 * (ymax - ymin)
+                mask = occ_t >= 0.5
+                dots = self.ax_temp.scatter(
+                    tt[mask], np.full(mask.sum(), rail_y),
+                    s=12, marker="o", alpha=0.7, color=self.colors["occ_band"],
+                    zorder=2.2
+                )
+                self._occ_temp_artists.append(dots)
+
+            else:
+                # default: bigger comfort-like band when occupied
+                band = self.ax_temp.fill_between(
+                    tt, band_lo, band_hi, where=(occ_t >= 0.5),
+                    alpha=0.22, color=self.colors["occ_band"], edgecolor="none",
+                    zorder=0.3, label="_nolegend_"
+                )
+                self._occ_temp_artists.append(band)
+
+        # --- comfort band (draw above occ cue so it's always visible)
         if getattr(self, "_temp_band", None):
             try: self._temp_band.remove()
             except Exception: pass
