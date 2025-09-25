@@ -14,19 +14,26 @@ from ..engine.settings import GameSettings
 from ..engine.datafeed import DataFeed
 from ..engine.reward import RewardConfig
 from .house_render import HouseRenderer, HouseRenderData
+# top of file, with the other imports
+import json  # >>> NEW
+from datetime import timedelta  # >>> NEW
 
 import datetime as dt
 
 
 from .plots import Charts
-TICKS = 1000  # ms between steps when playing
+TICKS = 600  # ms between steps when playing
 RAND = random.Random(42)
 
 class App:
     def __init__(self, root):
         
         data_dir = Path(__file__).resolve().parent.parent / "data"
-        weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01.csv"
+        weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01_old copy 2.csv"
+        # weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01_old - Copy.csv"
+
+
+        
         load_csv    = data_dir / "load_profile.csv"
 
         self.root = root
@@ -64,6 +71,13 @@ class App:
         # self.charts = Charts(self.right)
 
         # --- Controls ---------------------------------------------------------
+        # replay fields (BEFORE _build_controls)
+        self.replay_rows = []
+        self.replay_idx = 0
+        self.replay_on = tk.BooleanVar(value=False)
+        # repo root: .../noc  (two parents up from gui/)
+        self.replay_path_default = Path(__file__).resolve().parents[2] / "outputs" / "replays" / "ghost_run.csv"
+
         self._build_controls()
 
         # Use settings for both rewards and plotting
@@ -276,28 +290,93 @@ class App:
         ttk.Button(self.controls, text="Reset", command=self.reset).grid(row=0, column=5, padx=6)
         ttk.Button(self.controls, text="Export CSV", command=self.export).grid(row=0, column=6, padx=6)
         ttk.Button(self.controls, text="⚙ Settings", command=self.open_settings).grid(row=0, column=7, padx=6)
+        ttk.Button(self.controls, text="Load Replay", command=self._load_replay_csv).grid(row=0, column=8, padx=6)
+        ttk.Checkbutton(self.controls, text="Replay", variable=self.replay_on).grid(row=0, column=9, padx=6)
 
         # stretchy columns
-        for c in range(0, 8):
+        for c in range(0, 10):
             self.controls.columnconfigure(c, weight=1)
 
 
     # --------- LOOP ----------------------------------------------------------
     # --------- LOOP ----------------------------------------------------------
-    def step_once(self):
-        # 1) user action at this tick
-        action = Action(hvac=self.hvac.get(), battery=int(self.bat.get()))
+    def _load_replay_csv(self, path=None):
+        import csv
+        p = Path(path) if path else Path(self.replay_path_default)
+        if not p.exists():
+            self.status.config(text=f"Replay file not found: {p}")
+            return
+        rows = []
+        with p.open("r", newline="", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            for d in r:
+                # make all numerics floats/ints where sensible; ignore missing keys
+                def fget(k, default=0.0):
+                    try:
+                        return float(d.get(k, default))
+                    except (TypeError, ValueError):
+                        return float(default)
+                def iget(k, default=0):
+                    try:
+                        return int(float(d.get(k, default)))
+                    except (TypeError, ValueError):
+                        return int(default)
+                rows.append({
+                    "T_outside": fget("T_outside"),
+                    "price": fget("price"),
+                    "pv_kw": fget("pv_kw"),
+                    "base_load_kw": fget("base_load_kw"),
+                    "hvac": fget("hvac"),
+                    "battery_cmd": iget("battery_cmd"),
+                    # optional extras if present
+                    "ts": d.get("ts", None),
+                })
+        if not rows:
+            self.status.config(text=f"Replay file is empty: {p}")
+            return
+        self.replay_rows = rows
+        self.replay_idx = 0
+        self.replay_on.set(True)
+        # optional: align feed start if CSV has a timestamp column (we'll still override exogenous)
+        self.status.config(text=f"Replay loaded: {p.name} ({len(rows)} steps)")
 
-        # 2) data row for current sim time (t in seconds; dt=900 => 15 min)
+    def step_once(self):
+        # If replaying, pull next row; else read from UI/Feed
+        replay_row = None
+        if self.replay_on.get() and self.replay_idx < len(self.replay_rows):
+            replay_row = self.replay_rows[self.replay_idx]
+            self.replay_idx += 1
+            # 1) action from CSV
+            action = Action(hvac=float(replay_row["hvac"]),
+                            battery=int(replay_row["battery_cmd"]))
+        else:
+            # normal interactive action
+            action = Action(hvac=self.hvac.get(), battery=int(self.bat.get()))
+            if self.replay_on.get() and self.replay_idx >= len(self.replay_rows) and self.playing:
+                # reached EOF during replay
+                self.playing = False
+                self.play_btn.config(text="▶ Play")
+                self.status.config(text="Status: Replay finished.")
+                return
+
+        # 2) get data row for current sim time
         row = self.feed.by_time(self.state.t)
         occupied = bool(row.occupied_home)
 
-        # 3) inputs derived from data + settings
-        price         = float(row.price_eur_per_kwh)
-        T_outside     = float(row.t_out_c)
-        pv_kwp_yield  = float(row.solar_gen_kw_per_kwp)            # kW per kWp (0..~1)
-        pv_kw         = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
-        base_load_kw  = float(row.base_load_kw)  # positive consumption
+        # 3) inputs (use CSV values in replay; otherwise from feed/settings)
+        if replay_row is not None:
+            price        = float(replay_row["price"])
+            T_outside    = float(replay_row["T_outside"])
+            pv_kw        = float(replay_row["pv_kw"])
+            base_load_kw = float(replay_row["base_load_kw"])
+            # still define pv_kwp_yield for charts; safe default
+            pv_kwp_yield = float(getattr(row, "solar_gen_kw_per_kwp", 0.0))
+        else:
+            price        = float(row.price_eur_per_kwh)
+            T_outside    = float(row.t_out_c)
+            pv_kwp_yield = float(row.solar_gen_kw_per_kwp)
+            pv_kw        = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
+            base_load_kw = float(row.base_load_kw)
 
         # Optional simple gains
         q_internal_kw = 0.7 if occupied else 0.3
@@ -311,7 +390,7 @@ class App:
                 "price": price,
                 "pv_kw": pv_kw,                # generation (+)
                 "base_load_kw": base_load_kw,  # consumption (+)
-                "battery_cmd": int(self.bat.get()),
+                "battery_cmd": int(action.battery),  # <-- was self.bat.get()
                 "settings": self.settings,
                 "occupied_home": int(occupied),
                 "q_internal_kw": q_internal_kw,

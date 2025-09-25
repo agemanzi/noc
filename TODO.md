@@ -1,5 +1,5 @@
 # Expand data
-
+(.venv) PS C:\_projekty_repo\noc> python -m thermal_game.gui.app
 # Right side 
     -  AI 
     - off on PV kdyz nesviti
@@ -20,7 +20,7 @@
         SOC GRAFIKA
         TIN T OUT LABLE JE UGLY AF
         NAHRAT TAM REAL DATA 
-        
+
 
         optrional:
 
