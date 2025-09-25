@@ -331,6 +331,15 @@ class SimulationEngine:
             cfg=cfg,                    # ✅ use the cfg here
         )
 
+        # --- NEW: cumulative tallies ---
+        cum_reward_prev  = float(getattr(prev, "cumulative_reward", 0.0))
+        cum_fin_prev     = float(getattr(prev, "cumulative_financial", 0.0))
+        cum_comf_prev    = float(getattr(prev, "cumulative_comfort", 0.0))
+
+        cum_reward_next  = cum_reward_prev + float(reward_bits["reward_total"])
+        cum_fin_next     = cum_fin_prev    + float(reward_bits["financial_score"])
+        cum_comf_next    = cum_comf_prev   + float(reward_bits["comfort_score"])
+
         # --- If your GameState does NOT have ts/occupied fields, use this simpler replace: ---
         state = replace(
             prev,
@@ -341,6 +350,10 @@ class SimulationEngine:
             kwh_used=float(prev.kwh_used) + import_kwh,   # cumulative import
             ts=inputs.get("ts", getattr(prev, "ts", None)),
             occupied=int(inputs.get("occupied_home", getattr(prev, "occupied", 0) or 0)),
+            # NEW
+            cumulative_reward=cum_reward_next,
+            cumulative_financial=cum_fin_next,
+            cumulative_comfort=cum_comf_next,
         )
 
         metrics = {
@@ -384,6 +397,11 @@ class SimulationEngine:
             "reward_comf":      reward_bits["comfort_score"],
             "reward":           reward_bits["reward_total"],  # total (back-compat)
             "opex_cost":        reward_bits["net_opex"],      # back-compat alias
+
+            # NEW cumulative mirrors (optional but convenient)
+            "cum_reward":       cum_reward_next,
+            "cum_financial":    cum_fin_next,
+            "cum_comfort":      cum_comf_next,
         }
         
         return StepResult(state=state, metrics=metrics)

@@ -19,7 +19,7 @@ import datetime as dt
 
 
 from .plots import Charts
-TICKS = 800  # ms between steps when playing
+TICKS = 1000  # ms between steps when playing
 RAND = random.Random(42)
 
 class App:
@@ -154,7 +154,7 @@ class App:
     def _build_left(self):
         self.house_view = HouseRenderer(
             self.left,
-            width=500, height=320,
+            width=600, height=1000,
             image_path=os.path.join(os.path.dirname(__file__), "house.png"),
             title="House"
         )
@@ -407,6 +407,7 @@ class App:
 
             # battery
             soc=float(self.state.soc),
+            cumulative_score=float(getattr(self.state, "cumulative_reward", 0.0)),
         ))
 
         # 12) status line
@@ -467,24 +468,28 @@ class App:
     def _mk_reward_cfg_from_settings(self) -> RewardConfig:
         # Translate anchor (€/deg²·hour) to per-step (€/deg²·step)
         cw = float(self.settings.comfort_anchor_eur_per_deg2_hour) * self.engine.dt_h
-        return RewardConfig(
+
+        cfg_kwargs = dict(
             comfort_target_C    = self.settings.comfort_target_C,
             comfort_tolerance_C = self.settings.comfort_tolerance_C,
-            comfort_weight      = cw,  # derived!
+            comfort_weight      = cw,
             export_tariff_ratio = self.settings.export_tariff_ratio,
         )
 
-    def open_settings(self):
+        # Add only if the RewardConfig you're importing actually has it
+        if hasattr(RewardConfig, "__dataclass_fields__") and \
+           "comfort_inside_bonus" in RewardConfig.__dataclass_fields__:
+            cfg_kwargs["comfort_inside_bonus"] = float(self.settings.comfort_inside_bonus_eur_per_step)
 
+        return RewardConfig(**cfg_kwargs)
+    def open_settings(self):
         # --- PRESETS ------------------------------------------------------------
-        # Tweak these numbers to your taste
         PRESETS = {
-            "Small PV / Large Batt": {"pv_kw": 2.0, "batt_kwh": 12.0},
-            "Large PV / Small Batt": {"pv_kw": 8.0, "batt_kwh": 3.0},
-            "Mid / Mid":             {"pv_kw": 4.0, "batt_kwh": 6.0},  # your current defaults
+            "Small PV / Large Batt": {"pv_kw": 5.0, "batt_kwh": 15.0},
+            "Large PV / Small Batt": {"pv_kw": 15.0, "batt_kwh": 5.0},
+            "Mid / Mid":             {"pv_kw": 10.0, "batt_kwh": 10.0},
         }
-        
-        # Helper to apply a preset to the entry vars
+
         def apply_preset(name: str):
             p = PRESETS[name]
             pv_var.set(p["pv_kw"])
@@ -493,55 +498,28 @@ class App:
         win = tk.Toplevel(self.root)
         win.title("Game Settings")
         win.grab_set()
+        # make the entry column stretch
+        win.columnconfigure(1, weight=1)
 
         pv_var   = tk.DoubleVar(value=self.settings.pv_size_kw)
         hvac_var = tk.DoubleVar(value=self.settings.hvac_size_kw)
         batt_var = tk.DoubleVar(value=self.settings.batt_size_kwh)
         date_var = tk.StringVar(value=self.settings.start_date.isoformat())
 
-        # NEW comfort/econ vars
-        ctgt_var = tk.DoubleVar(value=self.settings.comfort_target_C)
-        ctol_var = tk.DoubleVar(value=self.settings.comfort_tolerance_C)
-        cwgt_var = tk.DoubleVar(value=self.settings.comfort_weight)
-        xrt_var  = tk.DoubleVar(value=self.settings.export_tariff_ratio)
-
+        # comfort/econ vars
+        ctgt_var   = tk.DoubleVar(value=self.settings.comfort_target_C)
+        ctol_var   = tk.DoubleVar(value=self.settings.comfort_tolerance_C)
+        cwgt_var   = tk.DoubleVar(value=self.settings.comfort_weight)
+        xrt_var    = tk.DoubleVar(value=self.settings.export_tariff_ratio)
         anchor_var = tk.DoubleVar(value=self.settings.comfort_anchor_eur_per_deg2_hour)
-
-        r = 0
-        ttk.Label(win, text="PV size (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=pv_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        ttk.Label(win, text="HVAC size (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=hvac_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        ttk.Label(win, text="Battery size (kWh)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=batt_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        ttk.Label(win, text="Start date (YYYY-MM-DD)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=date_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        # NEW: comfort & tariff
-        ttk.Label(win, text="Comfort target (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=ctgt_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        ttk.Label(win, text="Comfort tolerance (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=ctol_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        ttk.Label(win, text="Comfort weight (€/step)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=cwgt_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        ttk.Label(win, text="Export tariff ratio (0..1)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=xrt_var).grid(row=r-1, column=1, padx=6, pady=4)
-
-        # UI rows (labels + entries)
-        ttk.Label(win, text="Comfort price (€/deg²·hour)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
-        ttk.Entry(win, textvariable=anchor_var).grid(row=r-1, column=1, padx=6, pady=4)
+        bonus_var = tk.DoubleVar(value=self.settings.comfort_inside_bonus_eur_per_step)
 
         r = 0
 
-        # --- Presets row (buttons) ----------------------------------------------
-        ttk.Label(win, text="Presets").grid(row=r, column=0, sticky="w", padx=6, pady=(6, 2))
-        btns = ttk.Frame(win); btns.grid(row=r, column=1, sticky="w", padx=6, pady=(6, 2))
+        # ---- Presets row at the very top --------------------------------------
+        ttk.Label(win, text="Presets (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=(8, 4))
+        btns = ttk.Frame(win)
+        btns.grid(row=r, column=1, sticky="w", padx=6, pady=(8, 4))
         ttk.Button(btns, text="Small PV / Large Batt",
                 command=lambda: apply_preset("Small PV / Large Batt")).pack(side="left", padx=2)
         ttk.Button(btns, text="Large PV / Small Batt",
@@ -550,8 +528,44 @@ class App:
                 command=lambda: apply_preset("Mid / Mid")).pack(side="left", padx=2)
         r += 1
 
+        # ---- System sizes (PV / HVAC / Battery) --------------------------------
+        ttk.Label(win, text="PV size (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=pv_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
 
+        ttk.Label(win, text="HVAC size (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=hvac_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
 
+        ttk.Label(win, text="Battery size (kWh)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=batt_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        # ---- Start date --------------------------------------------------------
+        ttk.Label(win, text="Start date (YYYY-MM-DD)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=date_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        # ---- Comfort & tariff --------------------------------------------------
+        ttk.Label(win, text="Comfort target (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=ctgt_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        ttk.Label(win, text="Comfort tolerance (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=ctol_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        ttk.Label(win, text="Comfort weight (€/step)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=cwgt_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        ttk.Label(win, text="Export tariff ratio (0..1)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=xrt_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        ttk.Label(win, text="Comfort price (€/deg²·hour)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=anchor_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        ttk.Label(win, text="Comfort bonus (€/step, inside band)").grid(
+            row=r, column=0, sticky="w", padx=6, pady=4
+        )
+        ttk.Entry(win, textvariable=bonus_var).grid(
+            row=r, column=1, sticky="ew", padx=6, pady=4
+        ); r += 1
+
+        # ---- Save button pinned to the bottom ---------------------------------
         def save_and_close():
             import datetime as dt
             self.settings.pv_size_kw    = pv_var.get()
@@ -562,27 +576,29 @@ class App:
             except ValueError:
                 pass
 
-            # NEW: save comfort/tariff
+            # persist comfort/tariff
             self.settings.comfort_target_C    = ctgt_var.get()
             self.settings.comfort_tolerance_C = ctol_var.get()
             self.settings.comfort_weight      = cwgt_var.get()
             self.settings.export_tariff_ratio = xrt_var.get()
             self.settings.comfort_anchor_eur_per_deg2_hour = anchor_var.get()
-            # Rebuild reward cfg and refresh chart comfort band
+            self.settings.comfort_inside_bonus_eur_per_step = bonus_var.get()
+
+            # refresh reward cfg + chart band
             self.reward_cfg = self._mk_reward_cfg_from_settings()
             lo = self.settings.comfort_target_C - self.settings.comfort_tolerance_C
             hi = self.settings.comfort_target_C + self.settings.comfort_tolerance_C
-            self.charts.comfort = (lo, hi)           # applied on next draw
+            self.charts.comfort = (lo, hi)
 
-            # >>> NEW: jump to the requested start date without changing the calendar
+            # jump to new start date (t=0)
             self.feed.set_anchor_date(self.settings.start_date)
             self.state.t = 0
             self.charts.reset_time_axes(clear_buffers=True)
             self.status.config(text=f"Status: Start date → {self.settings.start_date.isoformat()} (t=0)")
-
             win.destroy()
 
-        ttk.Button(win, text="Save", command=save_and_close).grid(row=r, column=0, columnspan=2, pady=8)
+        save_btn = ttk.Button(win, text="Save", command=save_and_close)
+        save_btn.grid(row=r, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 10))
 
 
     # --- HVAC auto-repeat helpers --------------------------------------------

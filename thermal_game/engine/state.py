@@ -11,15 +11,21 @@ class Action:
     hvac: float
     battery: BatteryAct
 
+
 @dataclass
 class GameState:
-    t: float                  # sim time (s)
-    T_inside: float           # °C
-    T_outside: float          # °C (copied from inputs each step)
-    soc: float                # 0..1
-    kwh_used: float           # cumulative grid import (kWh)
-    ts: Optional[dt.datetime] = None  # OPTIONAL: wall-clock timestamp from feed
-    occupied: Optional[int] = None    # OPTIONAL: 1/0 occupancy from feed
+    t: float
+    T_inside: float
+    T_outside: float
+    soc: float
+    kwh_used: float
+    ts: Optional[dt.datetime] = None
+    occupied: Optional[int] = None
+
+    # NEW: cumulative scores (start at 0.0)
+    cumulative_reward: float = 0.0
+    cumulative_financial: float = 0.0
+    cumulative_comfort: float = 0.0
 
 @dataclass
 class StepResult:
