@@ -52,6 +52,31 @@ class DataFeed:
             raise RuntimeError("DataFeed: no rows parsed")
         self.start_ts = self.rows[0].ts
         self.dt_seconds = 15 * 60
+        # ---- Anchor where t=0 maps to (default: first row) -----------------
+        self._ts_list = [r.ts for r in self.rows]   # sorted by _read()
+        self._anchor_index = 0
+        self._anchor_ts = self._ts_list[0]
+
+    # ---- Anchor controls ----------------------------------------------------
+    def set_anchor_datetime(self, anchor_ts: dt.datetime) -> int:
+        """Move t=0 to the first row >= anchor_ts. Returns the anchor index."""
+        from bisect import bisect_left
+        i = bisect_left(self._ts_list, anchor_ts)
+        if i < 0:
+            i = 0
+        if i >= len(self._ts_list):
+            i = len(self._ts_list) - 1
+        self._anchor_index = i
+        self._anchor_ts = self._ts_list[i]
+        return i
+
+    def set_anchor_date(self, anchor_date: dt.date) -> int:
+        """Convenience: anchor to YYYY-MM-DD 00:00."""
+        return self.set_anchor_datetime(dt.datetime.combine(anchor_date, dt.time(0, 0)))
+
+    @property
+    def anchor_ts(self) -> dt.datetime:
+        return self._anchor_ts
 
     # ---------- point access ----------
     def by_index(self, idx: int) -> DataRow:
@@ -62,7 +87,8 @@ class DataFeed:
         return self.rows[idx]
 
     def by_time(self, t_seconds: float) -> DataRow:
-        idx = int(round(t_seconds / self.dt_seconds))
+        # Offset by anchor so t=0 corresponds to the anchor row
+        idx = self._anchor_index + int(round(t_seconds / self.dt_seconds))
         return self.by_index(idx)
 
     # ---------- future windows for plotting ----------
@@ -86,7 +112,7 @@ class DataFeed:
 
     def window_by_time(self, t_seconds: float, horizon_steps: int = 48) -> ForecastWindow:
         """Same as window_by_index, but anchored at current sim time in seconds."""
-        idx = int(round(t_seconds / self.dt_seconds))
+        idx = self._anchor_index + int(round(t_seconds / self.dt_seconds))
         return self.window_by_index(idx, horizon_steps)
 
     # ---------- optional: whole-series arrays (useful for static plots/QA) ----------

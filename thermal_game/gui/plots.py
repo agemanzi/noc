@@ -152,6 +152,79 @@ class Charts:
 
         self._elec_fills = []
 
+    def reset_time_axes(self, clear_buffers: bool = True):
+        """
+        Clear cached x/y data and force Matplotlib to recompute limits/formatters.
+        Call this whenever the datafeed anchor changes (i.e., start date changes).
+        """
+        # 1) clear buffers so we don't mix old and new dates
+        if clear_buffers:
+            for k in self.buf:
+                self.buf[k].clear()
+
+        # 2) clear all line/patch artists' data
+        for ln in (
+            self.l_total, self.l_hvac_act, self.l_batt_act, self.l_price, self.l_soc,
+            self.l_Tin, self.l_Tout, self.l_solar,
+            self.l_price_fc, self.l_Tout_fc, self.l_solar_fc,
+            self.l_reward_fin, self.l_reward_comf, self.l_reward_tot
+        ):
+            ln.set_data([], [])
+
+        # remove fills/bands if present
+        for poly in getattr(self, "_elec_fills", []):
+            try: poly.remove()
+            except Exception: pass
+        self._elec_fills = []
+
+        if getattr(self, "_solar_fill", None):
+            try: self._solar_fill.remove()
+            except Exception: pass
+        self._solar_fill = None
+
+        if getattr(self, "_temp_band", None):
+            try: self._temp_band.remove()
+            except Exception: pass
+        self._temp_band = None
+
+        if getattr(self, "_occ_fill", None):
+            try: self._occ_fill.remove()
+            except Exception: pass
+        self._occ_fill = None
+
+        if getattr(self, "_occ_fill_fc", None):
+            try: self._occ_fill_fc.remove()
+            except Exception: pass
+        self._occ_fill_fc = None
+
+        for art in getattr(self, "_occ_temp_artists", []):
+            try: art.remove()
+            except Exception: pass
+        self._occ_temp_artists = []
+
+        # 3) hard reset limits so mpl recomputes from fresh data
+        for ax in (self.ax_elec, self.ax_actions, self.ax_temp, self.ax_weather,
+                   self.ax_price, self.ax_solar, self.ax_reward):
+            ax.relim()
+            ax.autoscale_view()
+            ax.set_xlim(auto=True)
+            ax.set_ylim(auto=True)
+
+        # re-apply any preferred y ranges after reset
+        self.ax_actions.set_ylim(-1.05, 1.05)
+        self.ax_temp.set_ylim(15, 30)
+        self.ax_elec.set_ylim(-10, 10)
+
+        # ensure date locator/formatter is still set
+        locator = mdates.AutoDateLocator()
+        formatter = mdates.ConciseDateFormatter(locator)
+        for ax in (self.ax_elec, self.ax_actions, self.ax_temp, self.ax_weather):
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+
+        # redraw
+        self.canvas.draw_idle()
+
     # --------------- public API ----------------------------------------------
     def update(self, step_or_state, metrics: dict):
         s = getattr(step_or_state, "state", step_or_state)

@@ -13,7 +13,7 @@ from ..engine.recorder import GameRecorder
 from ..engine.settings import GameSettings
 from ..engine.datafeed import DataFeed
 from ..engine.reward import RewardConfig
-
+from .house_render import HouseRenderer, HouseRenderData
 
 import datetime as dt
 
@@ -28,18 +28,15 @@ class App:
         data_dir = Path(__file__).resolve().parent.parent / "data"
         weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01.csv"
         load_csv    = data_dir / "load_profile.csv"
-        self.feed = DataFeed(weather_csv, load_csv)
-        #priont the paths:!
-        # print("Using data files:")
-        # print(f" Weather/price/solar: {weather_csv}")
-        # print(f" Load profile:        {load_csv}")
-        
 
         self.root = root
         self.engine = SimulationEngine(dt=900)
         self.rec = GameRecorder()
-        self.settings = GameSettings() 
-        self.start_dt = dt.datetime.combine(self.settings.start_date, dt.time(0, 0)) #self.feed.start_ts
+        self.settings = GameSettings()
+        # Create feed *after* settings so we can rebase timestamps
+        self.feed = DataFeed(weather_csv, load_csv)
+        self.feed.set_anchor_date(self.settings.start_date)
+        self.start_dt = dt.datetime.combine(self.settings.start_date, dt.time(0, 0))
         self.state = GameState(
             t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0
         )
@@ -75,6 +72,7 @@ class App:
         lo = self.settings.comfort_target_C - self.settings.comfort_tolerance_C
         hi = self.settings.comfort_target_C + self.settings.comfort_tolerance_C
         self.charts = Charts(self.right, comfort=(lo, hi))        
+        self.charts.reset_time_axes(clear_buffers=True)  # ensure clean state for initial anchor
         
         # play/pause
         self.playing = False
@@ -107,110 +105,126 @@ class App:
         lbl.pack()
         return f, lbl
 
-    def draw_house(self, occupied: bool, pv_on: bool, night: float):
-        """
-        Render the house image with overlays.
+    # def draw_house(self, occupied: bool, pv_on: bool, night: float):
+    #     """
+    #     Render the house image with overlays.
 
-        Args:
-            occupied: if True, windows glow
-            pv_on:    if True, add a subtle roof/sun accent
-            night:    0.0 (day) .. 1.0 (deep night) darkening filter
-        """
-        # 1) start from base
-        img = self._img_house_base.copy()
+    #     Args:
+    #         occupied: if True, windows glow
+    #         pv_on:    if True, add a subtle roof/sun accent
+    #         night:    0.0 (day) .. 1.0 (deep night) darkening filter
+    #     """
+    #     # 1) start from base
+    #     img = self._img_house_base.copy()
 
-        # 2) resize to canvas
-        img = img.resize((self.house_canvas_w, self.house_canvas_h), Image.Resampling.LANCZOS)
+    #     # 2) resize to canvas
+    #     img = img.resize((self.house_canvas_w, self.house_canvas_h), Image.Resampling.LANCZOS)
 
-        # 3) night filter (darken via multiply towards black)
-        if night > 0:
-            night = max(0.0, min(1.0, float(night)))
-            black = Image.new("RGBA", img.size, (0, 0, 0, int(180 * night)))
-            img = Image.alpha_composite(img, black)
+    #     # 3) night filter (darken via multiply towards black)
+    #     if night > 0:
+    #         night = max(0.0, min(1.0, float(night)))
+    #         black = Image.new("RGBA", img.size, (0, 0, 0, int(180 * night)))
+    #         img = Image.alpha_composite(img, black)
 
-        # 4) occupancy lights (simple yellow windows)
-        if occupied:
-            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            d = ImageDraw.Draw(overlay)
-            # rectangles approximating “windows” — adjust to your PNG
-            win = [(20, 35, 40, 55), (50, 35, 70, 55), (80, 35, 100, 55)]
-            for x0, y0, x1, y1 in win:
-                d.rectangle([x0, y0, x1, y1], fill=(255, 220, 90, 180))
-            img = Image.alpha_composite(img, overlay)
+    #     # 4) occupancy lights (simple yellow windows)
+    #     if occupied:
+    #         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    #         d = ImageDraw.Draw(overlay)
+    #         # rectangles approximating “windows” — adjust to your PNG
+    #         win = [(20, 35, 40, 55), (50, 35, 70, 55), (80, 35, 100, 55)]
+    #         for x0, y0, x1, y1 in win:
+    #             d.rectangle([x0, y0, x1, y1], fill=(255, 220, 90, 180))
+    #         img = Image.alpha_composite(img, overlay)
 
-        # 5) PV accent (little sun + roof tint)
-        if pv_on:
-            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            d = ImageDraw.Draw(overlay)
-            # sun
-            d.ellipse([img.size[0]-32, 8, img.size[0]-12, 28], fill=(255, 215, 0, 180))
-            # roof strip (adjust coords to your house.png roof)
-            d.rectangle([20, 20, img.size[0]-20, 30], fill=(34, 197, 94, 90))  # greenish
-            img = Image.alpha_composite(img, overlay)
+    #     # 5) PV accent (little sun + roof tint)
+    #     if pv_on:
+    #         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    #         d = ImageDraw.Draw(overlay)
+    #         # sun
+    #         d.ellipse([img.size[0]-32, 8, img.size[0]-12, 28], fill=(255, 215, 0, 180))
+    #         # roof strip (adjust coords to your house.png roof)
+    #         d.rectangle([20, 20, img.size[0]-20, 30], fill=(34, 197, 94, 90))  # greenish
+    #         img = Image.alpha_composite(img, overlay)
 
-        # 6) push to canvas
-        self._house_tk = ImageTk.PhotoImage(img)  # keep ref to avoid GC
-        self.house_canvas.delete("all")
-        self.house_canvas.create_image(0, 0, image=self._house_tk, anchor="nw")
-
-
+    #     # 6) push to canvas
+    #     self._house_tk = ImageTk.PhotoImage(img)  # keep ref to avoid GC
+    #     self.house_canvas.delete("all")
+    #     self.house_canvas.create_image(0, 0, image=self._house_tk, anchor="nw")
+        
     def _build_left(self):
-        # HOUSE card
-        house = ttk.Labelframe(self.left, text="House")
-        house.pack(fill="x", pady=4)
+        self.house_view = HouseRenderer(
+            self.left,
+            width=500, height=320,
+            image_path=os.path.join(os.path.dirname(__file__), "house.png"),
+            title="House"
+        )
+        # Only SOC + temps; SOC at top-left
+        self.house_view.set_config({
+            "feature_flags": {"show_soc": True, "show_temps": True},
+            "gauges": {"soc": {"corner": "top_left"}},
+            # Optional: tweak outside thresholds if you want different bands
+            # "temps": {"tout": {"cold_max_C": -5.0, "hot_min_C": 28.0}}
+        })
+        self.house_view.pack(fill="x", pady=4)
 
-        # canvas for the PNG + first neutral draw (no occupancy, day)
-        self.house_canvas_w = 160
-        self.house_canvas_h = 120
-        self.house_canvas = tk.Canvas(house, width=self.house_canvas_w,
-                                    height=self.house_canvas_h, highlightthickness=0)
-        self.house_canvas.pack(pady=(6, 0))
 
-        # preload image once (requires Pillow)
-        import os
-        from PIL import Image, ImageTk, ImageDraw
-        self._img_house_base_path = os.path.join(os.path.dirname(__file__), "house.png")
-        try:
-            from PIL import Image
-            self._img_house_base = Image.open(self._img_house_base_path).convert("RGBA")
-        except Exception:
-            self._img_house_base = Image.new("RGBA", (160, 120), (200, 200, 200, 255))
-            ImageDraw.Draw(self._img_house_base).text((8,8), "house.png\nmissing", fill=(80,80,80,255))
+    # def _build_left(self):
+    #     # HOUSE card
+    #     house = ttk.Labelframe(self.left, text="House")
+    #     house.pack(fill="x", pady=4)
 
-        # create label variable AFTER declaring it
-        self.occupancy_var = tk.StringVar(value="Empty")
-        ttk.Label(house, textvariable=self.occupancy_var).pack(anchor="w", padx=6, pady=6)
+    #     # canvas for the PNG + first neutral draw (no occupancy, day)
+    #     self.house_canvas_w = 160
+    #     self.house_canvas_h = 120
+    #     self.house_canvas = tk.Canvas(house, width=self.house_canvas_w,
+    #                                 height=self.house_canvas_h, highlightthickness=0)
+    #     self.house_canvas.pack(pady=(6, 0))
 
-        # first static render
-        self._house_tk = None
-        self.draw_house(occupied=False, pv_on=False, night=0.0)
+    #     # preload image once (requires Pillow)
+    #     import os
+    #     from PIL import Image, ImageTk, ImageDraw
+    #     self._img_house_base_path = os.path.join(os.path.dirname(__file__), "house.png")
+    #     try:
+    #         from PIL import Image
+    #         self._img_house_base = Image.open(self._img_house_base_path).convert("RGBA")
+    #     except Exception:
+    #         self._img_house_base = Image.new("RGBA", (160, 120), (200, 200, 200, 255))
+    #         ImageDraw.Draw(self._img_house_base).text((8,8), "house.png\nmissing", fill=(80,80,80,255))
 
-        # DEVICES card
-        devices = ttk.Labelframe(self.left, text="Devices")
-        devices.pack(fill="x", pady=4)
-        row = ttk.Frame(devices); row.pack(fill="x", pady=4)
-        (b1, self.badge_hvac) = self._badge(row, "HVAC", "#4f46e5"); b1.pack(side="left", padx=4)
-        (b2, self.badge_pv)   = self._badge(row, "PV OFF", "#6b7280"); b2.pack(side="left", padx=4)
-        (b3, self.badge_bat)  = self._badge(row, "Batt 50%", "#059669"); b3.pack(side="left", padx=4)
+    #     # create label variable AFTER declaring it
+    #     self.occupancy_var = tk.StringVar(value="Empty")
+    #     ttk.Label(house, textvariable=self.occupancy_var).pack(anchor="w", padx=6, pady=6)
 
-        # OUTPUTS card
-        outputs = ttk.Labelframe(self.left, text="Outputs")
-        outputs.pack(fill="both", expand=True, pady=4)
-        grid = ttk.Frame(outputs); grid.pack(fill="x", padx=6, pady=6)
-        labels = {
-            "hvac_heat": "HVAC Heat/Cool (kW)",
-            "pv_gen": "PV Generation (kW)",
-            "batt_soc": "Battery SOC",
-            "reward_fin": "Financial score (€/step)",
-            "reward_comf": "Comfort score (€/step)",
-            "reward": "Total reward (€/step)",
-        }
-        self.out_vars = {k: tk.StringVar(value="–") for k in labels}
-        r = 0
-        for key, title in labels.items():
-            ttk.Label(grid, text=title).grid(row=r, column=0, sticky="w")
-            ttk.Label(grid, textvariable=self.out_vars[key]).grid(row=r, column=1, sticky="e")
-            r += 1
+    #     # first static render
+    #     self._house_tk = None
+    #     self.draw_house(occupied=False, pv_on=False, night=0.0)
+
+    #     # DEVICES card
+    #     devices = ttk.Labelframe(self.left, text="Devices")
+    #     devices.pack(fill="x", pady=4)
+    #     row = ttk.Frame(devices); row.pack(fill="x", pady=4)
+    #     (b1, self.badge_hvac) = self._badge(row, "HVAC", "#4f46e5"); b1.pack(side="left", padx=4)
+    #     (b2, self.badge_pv)   = self._badge(row, "PV OFF", "#6b7280"); b2.pack(side="left", padx=4)
+    #     (b3, self.badge_bat)  = self._badge(row, "Batt 50%", "#059669"); b3.pack(side="left", padx=4)
+
+    #     # OUTPUTS card
+    #     outputs = ttk.Labelframe(self.left, text="Outputs")
+    #     outputs.pack(fill="both", expand=True, pady=4)
+    #     grid = ttk.Frame(outputs); grid.pack(fill="x", padx=6, pady=6)
+    #     labels = {
+    #         "hvac_heat": "HVAC Heat/Cool (kW)",
+    #         "pv_gen": "PV Generation (kW)",
+    #         "batt_soc": "Battery SOC",
+    #         "reward_fin": "Financial score (€/step)",
+    #         "reward_comf": "Comfort score (€/step)",
+    #         "reward": "Total reward (€/step)",
+    #     }
+    #     self.out_vars = {k: tk.StringVar(value="–") for k in labels}
+    #     r = 0
+    #     for key, title in labels.items():
+    #         ttk.Label(grid, text=title).grid(row=r, column=0, sticky="w")
+    #         ttk.Label(grid, textvariable=self.out_vars[key]).grid(row=r, column=1, sticky="e")
+    #         r += 1
 
     # --------- CONTROLS ------------------------------------------------------
     def _build_controls(self):
@@ -325,25 +339,25 @@ class App:
         reward_comf = float(m.get("reward_comf", reward_tot - reward_fin))# comfort = total - financial
 
         # 7) occupancy text + house overlay
-        self.occupancy_var.set("Occupied" if occupied else "Away")
-        night = 1.0 - max(0.0, min(1.0, pv_kwp_yield))  # daytime → 0, night → 1
-        self.draw_house(occupied=occupied, pv_on=self.pv_on.get(), night=night)
+        # self.occupancy_var.set("Occupied" if occupied else "Away")
+        # night = 1.0 - max(0.0, min(1.0, pv_kwp_yield))  # daytime → 0, night → 1
+        # self.draw_house(occupied=occupied, pv_on=self.pv_on.get(), night=night)
 
         # 8) advance state before showing SOC
         self.state = step.state
 
-        # 9) badges/labels (now safe to use reward_* and new SOC)
-        self.badge_hvac.config(text=f"HVAC {action.hvac:+.1f}")
-        self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
-                            bg=("#10b981" if self.pv_on.get() else "#6b7280"))
-        self.badge_bat.config(text=f"Batt {int(self.state.soc*100):d}%")
+        # # 9) badges/labels (now safe to use reward_* and new SOC)
+        # self.badge_hvac.config(text=f"HVAC {action.hvac:+.1f}")
+        # self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
+        #                     bg=("#10b981" if self.pv_on.get() else "#6b7280"))
+        # self.badge_bat.config(text=f"Batt {int(self.state.soc*100):d}%")
 
-        self.out_vars["hvac_heat"].set(f"{hvac_kw:0.2f}")  # electric draw (kW)
-        self.out_vars["pv_gen"].set(f"{pv_kw:0.2f}")
-        self.out_vars["batt_soc"].set(f"{self.state.soc:0.2f}")
-        self.out_vars["reward_fin"].set(f"{reward_fin:+.3f}")
-        self.out_vars["reward_comf"].set(f"{reward_comf:+.3f}")
-        self.out_vars["reward"].set(f"{reward_tot:+.3f}")
+        # self.out_vars["hvac_heat"].set(f"{hvac_kw:0.2f}")  # electric draw (kW)
+        # self.out_vars["pv_gen"].set(f"{pv_kw:0.2f}")
+        # self.out_vars["batt_soc"].set(f"{self.state.soc:0.2f}")
+        # self.out_vars["reward_fin"].set(f"{reward_fin:+.3f}")
+        # self.out_vars["reward_comf"].set(f"{reward_comf:+.3f}")
+        # self.out_vars["reward"].set(f"{reward_tot:+.3f}")
 
         # 10) optional forecast (build BEFORE charts.update)
         try:
@@ -381,6 +395,20 @@ class App:
             "forecast": forecast_data,
         })
 
+        self.house_view.update(HouseRenderData(
+            timestamp=row.ts,
+            # temps
+            T_inside=float(self.state.T_inside) if hasattr(self.state, "T_inside") else None,
+            T_outside=T_outside,
+
+            # comfort band (for T_in color)
+            comfort_target_C=self.settings.comfort_target_C,
+            comfort_tolerance_C=self.settings.comfort_tolerance_C,
+
+            # battery
+            soc=float(self.state.soc),
+        ))
+
         # 12) status line
         self.status.config(text=f"Status: {row.ts:%Y-%m-%d %H:%M}  kWh={self.state.kwh_used:.3f}")
 
@@ -406,6 +434,7 @@ class App:
         self.play_btn.config(text="▶ Play")
         self.state = GameState(t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0)
         self.rec = GameRecorder()
+        self.charts.reset_time_axes(clear_buffers=True)
         self.status.config(text="Status: Reset.")
 
     def export(self):
@@ -413,9 +442,27 @@ class App:
         self.status.config(text=f"Status: Saved {path}")
         print(f"Saved {path}")
 
+    # def _update_badges(self):
+    #     self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
+    #                          bg=("#10b981" if self.pv_on.get() else "#6b7280"))
     def _update_badges(self):
-        self.badge_pv.config(text="PV ON" if self.pv_on.get() else "PV OFF",
-                             bg=("#10b981" if self.pv_on.get() else "#6b7280"))
+        # Repaint the house/HUD with the new PV toggle state using current time/state
+        row = self.feed.by_time(self.state.t)
+        pv_kwp_yield = float(row.solar_gen_kw_per_kwp)
+        price        = float(row.price_eur_per_kwh)
+        T_outside    = float(row.t_out_c)
+        occupied     = bool(row.occupied_home)
+        base_load_kw = float(row.base_load_kw)
+        pv_kw        = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
+
+        self.house_view.update(HouseRenderData(
+            timestamp=row.ts,
+            T_inside=float(getattr(self.state, "T_inside", 0.0)) if hasattr(self.state, "T_inside") else None,
+            T_outside=T_outside,
+            comfort_target_C=self.settings.comfort_target_C,
+            comfort_tolerance_C=self.settings.comfort_tolerance_C,
+            soc=float(self.state.soc) if hasattr(self.state, "soc") else None,
+        ))
 
     def _mk_reward_cfg_from_settings(self) -> RewardConfig:
         # Translate anchor (€/deg²·hour) to per-step (€/deg²·step)
@@ -428,6 +475,21 @@ class App:
         )
 
     def open_settings(self):
+
+        # --- PRESETS ------------------------------------------------------------
+        # Tweak these numbers to your taste
+        PRESETS = {
+            "Small PV / Large Batt": {"pv_kw": 2.0, "batt_kwh": 12.0},
+            "Large PV / Small Batt": {"pv_kw": 8.0, "batt_kwh": 3.0},
+            "Mid / Mid":             {"pv_kw": 4.0, "batt_kwh": 6.0},  # your current defaults
+        }
+        
+        # Helper to apply a preset to the entry vars
+        def apply_preset(name: str):
+            p = PRESETS[name]
+            pv_var.set(p["pv_kw"])
+            batt_var.set(p["batt_kwh"])
+
         win = tk.Toplevel(self.root)
         win.title("Game Settings")
         win.grab_set()
@@ -475,6 +537,21 @@ class App:
         ttk.Label(win, text="Comfort price (€/deg²·hour)").grid(row=r, column=0, sticky="w", padx=6, pady=4); r+=1
         ttk.Entry(win, textvariable=anchor_var).grid(row=r-1, column=1, padx=6, pady=4)
 
+        r = 0
+
+        # --- Presets row (buttons) ----------------------------------------------
+        ttk.Label(win, text="Presets").grid(row=r, column=0, sticky="w", padx=6, pady=(6, 2))
+        btns = ttk.Frame(win); btns.grid(row=r, column=1, sticky="w", padx=6, pady=(6, 2))
+        ttk.Button(btns, text="Small PV / Large Batt",
+                command=lambda: apply_preset("Small PV / Large Batt")).pack(side="left", padx=2)
+        ttk.Button(btns, text="Large PV / Small Batt",
+                command=lambda: apply_preset("Large PV / Small Batt")).pack(side="left", padx=2)
+        ttk.Button(btns, text="Mid / Mid",
+                command=lambda: apply_preset("Mid / Mid")).pack(side="left", padx=2)
+        r += 1
+
+
+
         def save_and_close():
             import datetime as dt
             self.settings.pv_size_kw    = pv_var.get()
@@ -495,9 +572,13 @@ class App:
             self.reward_cfg = self._mk_reward_cfg_from_settings()
             lo = self.settings.comfort_target_C - self.settings.comfort_tolerance_C
             hi = self.settings.comfort_target_C + self.settings.comfort_tolerance_C
-
-            
             self.charts.comfort = (lo, hi)           # applied on next draw
+
+            # >>> NEW: jump to the requested start date without changing the calendar
+            self.feed.set_anchor_date(self.settings.start_date)
+            self.state.t = 0
+            self.charts.reset_time_axes(clear_buffers=True)
+            self.status.config(text=f"Status: Start date → {self.settings.start_date.isoformat()} (t=0)")
 
             win.destroy()
 

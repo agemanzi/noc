@@ -24,7 +24,7 @@ class SimulationEngine:
     # -------- Building thermal (simple 1R1C) --------
     tau_h: float = 6.0              # h, envelope time constant
     cap_kwh_per_K: float = 3.0      # kWh/K, effective thermal capacity
-
+    allow_grid_charge: bool = True
     # -------- Battery defaults (scaled by GameSettings) --------
     batt_eta_ch: float = 0.95
     batt_eta_dis: float = 0.95
@@ -257,19 +257,59 @@ class SimulationEngine:
             hv = {"cop": di["cop"], "cop_carnot": di["cop_carnot"],
                   "T_source_C": di["T_source_C"], "T_sink_C": di["T_sink_C"]}
 
-        # Battery
+        # Battery — load-following dispatch using the same -1/0/+1 UI
         battery_cmd = int(inputs.get("battery_cmd", getattr(action, "battery", 0)))
-        batt = self._battery_step(float(prev.soc), battery_cmd, settings)
-        battery_kw = batt["battery_kw"]
-        soc_next   = batt["soc_next"]
+        soc_prev = float(prev.soc)
+        cap_kwh = max(0.0, float(settings.batt_size_kwh))
+        p_lim   = self.batt_c_rate * cap_kwh
+
+        # Net (without battery): +deficit means we must IMPORT from grid
+        net_no_batt_kw = (hvac_kw + base_load_kw) - pv_kw
+
+        want_kw = 0.0
+        if battery_cmd > 0:
+            # Discharge only up to the deficit (don't export unless deficit is zero)
+            want_kw = max(0.0, net_no_batt_kw)
+        elif battery_cmd < 0:
+            if self.allow_grid_charge:
+                want_kw = -p_lim           # PV + grid
+            else:
+                want_kw = -max(0.0, -net_no_batt_kw)  # PV-only (old behavior)
+        else:
+            want_kw = 0.0
+
+        # Bound by power limits and SOC limits using the existing helper
+        # Map want_kw to a temporary cmd to reuse _battery_step safely:
+        # if want discharge -> +1 else if want charge -> -1 else 0
+        tmp_cmd = 1 if want_kw > 1e-9 else (-1 if want_kw < -1e-9 else 0)
+        batt_tmp = self._battery_step(soc_prev, tmp_cmd, settings)
+        max_feasible_kw = batt_tmp["battery_kw"]           # (+) if discharging, (−) if charging
+
+        # Clip to both the "want" and feasible envelope
+        if want_kw >= 0:
+            battery_kw = min(max_feasible_kw, want_kw, p_lim)
+        else:
+            battery_kw = -min(abs(max_feasible_kw), abs(want_kw), p_lim)
+
+        # Recompute SOC from the actual battery_kw we'll apply
+        if battery_kw >= 0:
+            # actual discharge electrical out: battery_kw = eta_dis * p_kw ⇒ p_kw = battery_kw/eta
+            p_kw = battery_kw / max(self.batt_eta_dis, 1e-9)
+            soc_next = soc_prev - (p_kw * self.dt_h) / cap_kwh if cap_kwh > 0 else soc_prev
+        else:
+            # actual charge electrical in: battery_kw = -p_kw/eta_ch ⇒ p_kw = -battery_kw * eta_ch
+            p_kw = -battery_kw * self.batt_eta_ch
+            soc_next = soc_prev + (p_kw * self.dt_h) / cap_kwh if cap_kwh > 0 else soc_prev
+        soc_next = float(np.clip(soc_next, 0.0, 1.0))
 
         # Electrical balance in chart convention
         other_kw = -base_load_kw                       # charts expect loads negative
         total_kw = pv_kw + battery_kw + (-hvac_kw) + other_kw
 
         # split into import/export and convert to kWh for this step
-        grid_import_kw = max(0.0,  total_kw)
-        grid_export_kw = max(0.0, -total_kw)
+        # NOTE: total_kw > 0 means SURPLUS ⇒ EXPORT
+        grid_export_kw = max(0.0,  total_kw)
+        grid_import_kw = max(0.0, -total_kw)
         import_kwh = grid_import_kw * self.dt_h
         export_kwh = grid_export_kw * self.dt_h
 
