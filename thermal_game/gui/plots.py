@@ -46,10 +46,10 @@ class Charts:
 
         # figure & axes
         self.fig = Figure(figsize=(9.5, 6.8), dpi=100, constrained_layout=True)
-        self.ax_elec    = self.fig.add_subplot(221, title="Electricity Profile (kW)")
-        self.ax_actions = self.fig.add_subplot(222, title="Player Actions & Price", sharex=self.ax_elec)
-        self.ax_temp    = self.fig.add_subplot(223, title="Indoor Temperature (°C)", sharex=self.ax_elec)
-        self.ax_weather = self.fig.add_subplot(224, title="Weather: T_out / Solar", sharex=self.ax_elec)
+        self.ax_elec    = self.fig.add_subplot(221, title="Profil elektrické energie (kW)")
+        self.ax_actions = self.fig.add_subplot(222, title="Akce hráče a ceny", sharex=self.ax_elec)
+        self.ax_temp    = self.fig.add_subplot(223, title="Vnitřní teplota (°C)", sharex=self.ax_elec)
+        self.ax_weather = self.fig.add_subplot(224, title="Počasí: T_venk / Solární", sharex=self.ax_elec)
         self.ax_elec.axhline(0, lw=0.8, alpha=0.6)
 
         # twin axes
@@ -78,11 +78,11 @@ class Charts:
 
         # live lines
         (self.l_total,)    = self.ax_elec.plot([], [], lw=2, color=self.colors["total"], label="_nolegend_", zorder=5)
-        (self.l_hvac_act,) = self.ax_actions.plot([], [], lw=1.8, label="HVAC action")
-        (self.l_batt_act,) = self.ax_actions.plot([], [], lw=1.2, label="Battery action")
-        (self.l_price,)    = self.ax_price.plot([], [], lw=1.5, color="green", label="Price")
-        (self.l_Tin,)      = self.ax_temp.plot([], [], lw=2, label="T_inside")
-        (self.l_Te,)       = self.ax_temp.plot([], [], lw=1.5, linestyle="--", alpha=0.8, label="T_envelope")
+        (self.l_hvac_act,) = self.ax_actions.plot([], [], lw=1.8, label="Akce HVAC")
+        (self.l_batt_act,) = self.ax_actions.plot([], [], lw=1.2, label="Akce baterie")
+        (self.l_price,)    = self.ax_price.plot([], [], lw=1.5, color="green", label="Cena")
+        (self.l_Tin,)      = self.ax_temp.plot([], [], lw=2, label="T_vnitřní")
+        (self.l_Te,)       = self.ax_temp.plot([], [], lw=1.5, linestyle="--", alpha=0.8, label="T_obálka")
 
         (self.l_soc,)    = self.ax_actions.plot(
             [], [], linestyle="--", alpha=0.8, lw=1.2,
@@ -91,13 +91,13 @@ class Charts:
 
 
         # reward lines on right axis (three of them)
-        (self.l_reward_fin,)  = self.ax_reward.plot([], [], lw=1.6, label="Financial", color=self.colors["reward_fin"])
-        (self.l_reward_comf,) = self.ax_reward.plot([], [], lw=1.6, label="Comfort",   color=self.colors["reward_comf"])
-        (self.l_reward_tot,)  = self.ax_reward.plot([], [], lw=2.0, label="Total",     color=self.colors["reward_tot"])
+        (self.l_reward_fin,)  = self.ax_reward.plot([], [], lw=1.6, label="Finanční", color=self.colors["reward_fin"])
+        (self.l_reward_comf,) = self.ax_reward.plot([], [], lw=1.6, label="Komfort",   color=self.colors["reward_comf"])
+        (self.l_reward_tot,)  = self.ax_reward.plot([], [], lw=2.0, label="Celkem",     color=self.colors["reward_tot"])
 
-        (self.l_Tout,)    = self.ax_weather.plot([], [], lw=2, label="T_outside")
+        (self.l_Tout,)    = self.ax_weather.plot([], [], lw=2, label="T_venkovní")
         (self.l_solar,)   = self.ax_solar.plot([], [], lw=1.6, linestyle="--",
-                                               color=self.colors["solar_area"], label="Solar (W/m²)")
+                                               color=self.colors["solar_area"], label="Solární (W/m²)")
         self._solar_fill = None
         self._temp_band  = None
         self._occ_fill   = None
@@ -105,20 +105,20 @@ class Charts:
 
         # forecast lines
         (self.l_price_fc,) = self.ax_price.plot([], [], lw=1.2, linestyle=":", alpha=0.9,
-                                                color=self.colors["forecast"], label="Price (next 12h)")
+                                                color=self.colors["forecast"], label="Cena (příštích 12h)")
         (self.l_Tout_fc,)  = self.ax_weather.plot([], [], lw=1.2, linestyle=":", alpha=0.9,
-                                                color=self.colors["forecast"], label="T_out (next 12h)")
+                                                color=self.colors["forecast"], label="T_venk (příštích 12h)")
         (self.l_solar_fc,) = self.ax_solar.plot([], [], lw=1.1, linestyle=":", alpha=0.9,
-                                                color=self.colors["forecast"], label="Solar (next 12h)")
+                                                color=self.colors["forecast"], label="Solární (příštích 12h)")
 
         # electricity legend + initial y range
         elec_handles = [
-            Line2D([], [], lw=2, color=self.colors["total"], label="Total balance"),
-            Patch(alpha=0.35, facecolor=self.colors["pv"],       label="PV (+)"),
-            Patch(alpha=0.35, facecolor=self.colors["batt_pos"], label="Battery (+disch)"),
-            Patch(alpha=0.35, facecolor=self.colors["hvac"],     label="HVAC (draw)"),
-            Patch(alpha=0.35, facecolor=self.colors["other"],    label="Other load"),
-            Patch(alpha=0.35, facecolor=self.colors["batt_chg"], label="Battery (charge)"),
+            Line2D([], [], lw=2, color=self.colors["total"], label="Celková bilance"),
+            Patch(alpha=0.35, facecolor=self.colors["pv"],       label="FV (+)"),
+            Patch(alpha=0.35, facecolor=self.colors["batt_pos"], label="Baterie (+vybíjení)"),
+            Patch(alpha=0.35, facecolor=self.colors["hvac"],     label="HVAC (spotřeba)"),
+            Patch(alpha=0.35, facecolor=self.colors["other"],    label="Jiná zátěž"),
+            Patch(alpha=0.35, facecolor=self.colors["batt_chg"], label="Baterie (nabíjení)"),
         ]
         self.ax_elec.legend(handles=elec_handles, loc="upper left")
         self.ax_elec.set_ylim(-10, 10)
@@ -128,10 +128,10 @@ class Charts:
             ax.grid(True, alpha=0.25)
         self.ax_actions.set_ylim(-1.05, 1.05)
         self.ax_temp.set_ylim(15, 30)
-        self.ax_actions.set_ylabel("Action (-1..1)")
-        self.ax_price.set_ylabel("Price (€/kWh)")
+        self.ax_actions.set_ylabel("Akce (-1..1)")
+        self.ax_price.set_ylabel("Cena (€/kWh)")
         self.ax_temp.set_ylabel("°C")
-        self.ax_reward.set_ylabel("Reward (€/step)")
+        self.ax_reward.set_ylabel("Odměna (€/krok)")
         self.ax_weather.set_ylabel("°C")
         self.ax_solar.set_ylabel("W/m²")
         self.ax_reward.tick_params(axis="y", labelcolor="#374151")
@@ -154,6 +154,7 @@ class Charts:
 
         self._elec_fills = []
         self._show_rewards = True  # default
+        self._show_actions = True  # default
 
         # ---- X-axis windowing (2-day chunks that step by 1 day) ----
         self.window_days = 2               # visible width
@@ -170,7 +171,7 @@ class Charts:
 
         # toggle right axis visuals (ticks, label, spine, legend)
         self.ax_reward.yaxis.set_visible(self._show_rewards)
-        self.ax_reward.set_ylabel("Reward (€/step)" if self._show_rewards else "")
+        self.ax_reward.set_ylabel("Odměna (€/krok)" if self._show_rewards else "")
         self.ax_reward.spines["right"].set_visible(self._show_rewards)
 
         # remove legend if hidden (avoid empty box)
@@ -188,6 +189,33 @@ class Charts:
             self.ax_reward.legend(loc="upper right")
 
         # redraw now
+        self.canvas.draw_idle()
+
+    def set_show_actions(self, show: bool):
+        self._show_actions = bool(show)
+
+        # toggle player-driven lines
+        for ln in (self.l_hvac_act, self.l_batt_act, self.l_soc):
+            ln.set_visible(self._show_actions)
+
+        # toggle left axis visuals (ticks/label/spine/legend) but keep price axis
+        self.ax_actions.yaxis.set_visible(self._show_actions)
+        self.ax_actions.set_ylabel("Akce (-1..1)" if self._show_actions else "")
+        self.ax_actions.spines["left"].set_visible(self._show_actions)
+
+        # legend on the left axis (player actions)
+        leg = self.ax_actions.get_legend()
+        if leg:
+            leg.set_visible(self._show_actions)
+            if not self._show_actions:
+                try:
+                    leg.remove()
+                except Exception:
+                    pass
+        elif self._show_actions:
+            self.ax_actions.legend(loc="upper left")
+
+        # keep price legend/axis alone
         self.canvas.draw_idle()
 
     def _days_to_num(self, d):
@@ -308,6 +336,7 @@ class Charts:
 
         # keep reward visibility state after reset
         self.set_show_rewards(self._show_rewards)
+        self.set_show_actions(self._show_actions)
 
         # redraw
         self.canvas.draw_idle()

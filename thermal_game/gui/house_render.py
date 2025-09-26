@@ -28,6 +28,7 @@ except Exception:
 
 
 CONFIG: Dict[str, Any] = {
+    "ui_scale": 0.90,   # <<< NEW: shrink all UI elements ~10%
     "theme": {
         "canvas_bg": "#0b1220",
         "band_steps": 6,
@@ -123,7 +124,7 @@ CONFIG: Dict[str, Any] = {
         "y_frac": 0.88,             # vertical position as a fraction of height
         "prefix": "Σ",              # leading symbol
         "unit_suffix": "€",         # optional suffix; set "" to hide
-        "decimals": 2,
+        "decimals": 1,
         "zero_eps": 1e-7,
     },
     "clock": {
@@ -187,6 +188,8 @@ class HouseRenderer(ttk.Frame):
 
         import copy
         self._config = copy.deepcopy(CONFIG)
+        
+        self._ui = float(self._config.get("ui_scale", 1.0))  # <<< NEW
 
         self.card = ttk.Labelframe(self, text=title)
         self.card.pack(fill="both", expand=True)
@@ -318,8 +321,8 @@ class HouseRenderer(ttk.Frame):
         x0, y0, x1, y1 = bbox
         cfg = self._config["temps"]["backdrop"]
         if cfg.get("enabled", True) and Image is not None and ImageTk is not None:
-            pad  = int(cfg["pad_px"])
-            rad  = int(cfg["radius_px"])
+            pad  = int(cfg["pad_px"] * self._ui)   # was cfg["pad_px"]
+            rad  = int(cfg["radius_px"] * self._ui) # was cfg["radius_px"]
             alpha = int(cfg["alpha"])
             r, g, b = cfg["fill_rgb"]
 
@@ -347,8 +350,12 @@ class HouseRenderer(ttk.Frame):
         units = self._config["theme"]["label_units"]
 
         m = min(w, h)
-        value_font_size = max(14, int(cfg["value_scale"] * m))
-        gap = int(cfg["caption_gap_px"])
+        ui = self._ui
+        value_font_size = max(14, int(cfg["value_scale"] * m * ui))
+        gap = int(cfg["caption_gap_px"] * ui)
+
+        cap_size   = max(8,  int(cap["size"]   * ui))
+        units_size = max(8,  int(units["size"] * ui))
 
         # positions
         y = h // 2
@@ -370,15 +377,15 @@ class HouseRenderer(ttk.Frame):
 
         # Caption
         self.canvas.create_text(x_left, y - value_font_size - gap,
-                                text="T_out", anchor="s",
-                                fill=cap["fill"], font=("", cap["size"], cap["weight"]))
+                                text="T_venk", anchor="s",
+                                fill=cap["fill"], font=("", cap_size, cap["weight"]))
         # Value
         self._text_with_backdrop(x_left, y, t_out_txt,
                                  fill=t_out_color, font=("", value_font_size, "bold"))
         # Units (subtle)
         self.canvas.create_text(x_left, y + value_font_size + gap,
-                                text="outside", anchor="n",
-                                fill=units["fill"], font=("", units["size"], units["weight"]))
+                                text="venkovní", anchor="n",
+                                fill=units["fill"], font=("", units_size, units["weight"]))
 
         # --- T_in (right) ---
         t_in_txt = "—"
@@ -405,13 +412,13 @@ class HouseRenderer(ttk.Frame):
                 t_in_color = "#e6eeff"
 
         self.canvas.create_text(x_right, y - value_font_size - gap,
-                                text="T_in", anchor="s",
-                                fill=cap["fill"], font=("", cap["size"], cap["weight"]))
+                                text="T_vnitr", anchor="s",
+                                fill=cap["fill"], font=("", cap_size, cap["weight"]))
         self._text_with_backdrop(x_right, y, t_in_txt,
                                  fill=t_in_color, font=("", value_font_size, "bold"))
         self.canvas.create_text(x_right, y + value_font_size + gap,
-                                text="inside", anchor="n",
-                                fill=units["fill"], font=("", units["size"], units["weight"]))
+                                text="vnitřní", anchor="n",
+                                fill=units["fill"], font=("", units_size, units["weight"]))
 
     def _corner_xy(self, corner: str, r: int, pad: int, w: int, h: int) -> tuple[int, int]:
         if corner == "top_left":
@@ -424,9 +431,9 @@ class HouseRenderer(ttk.Frame):
 
     def _draw_soc(self, w: int, h: int, soc: float) -> None:
         cfg = self._config["gauges"]["soc"]
-        m = min(w, h)
-        r = max(8, int(cfg["radius_frac"] * m))
-        pad = int(cfg["pad_frac"] * m)
+        m = min(w, h); ui = self._ui
+        r = max(8, int(cfg["radius_frac"] * m * ui))
+        pad = int(cfg["pad_frac"] * m * ui)
 
         corner = str(cfg.get("corner", "top_left"))
         cx, cy = self._corner_xy(corner, r, pad, w, h)
@@ -460,7 +467,7 @@ class HouseRenderer(ttk.Frame):
         )
 
         if label:
-            base = int(max(cfg["label"].get("size", 10), float(cfg.get("font_scale", 0.20)) * r))
+            base = int(max(cfg["label"].get("size", 10), float(cfg.get("font_scale", 0.20)) * r) * self._ui)
             
             # Use the same translucent black pill background
             backdrop_cfg = self._config["temps"]["backdrop"]
@@ -484,9 +491,9 @@ class HouseRenderer(ttk.Frame):
 
     def _draw_hvac(self, w: int, h: int, d: HouseRenderData) -> None:
         cfg = self._config["gauges"]["hvac"]
-        m = min(w, h)
-        r = max(8, int(cfg["radius_frac"] * m))
-        pad = int(cfg["pad_frac"] * m)
+        m = min(w, h); ui = self._ui
+        r = max(8, int(cfg["radius_frac"] * m * ui))
+        pad = int(cfg["pad_frac"] * m * ui)
         cx, cy = self._corner_xy(str(cfg.get("corner", "top_right")), r, pad, w, h)
 
         # read values with safe fallbacks
@@ -530,7 +537,7 @@ class HouseRenderer(ttk.Frame):
                                outline=color, width=thickness)
 
         # labels (centered), reuse pill backdrop
-        base = int(max(10, float(cfg.get("font_scale", 0.20)) * r))
+        base  = int(max(10, float(cfg.get("font_scale", 0.20)) * r) * ui)
         small = max(8, int(base * 0.60))
         self._text_with_backdrop(cx, cy - int(base*0.15),
                                  top_line, fill=color, font=("", base, "bold"))
@@ -560,7 +567,8 @@ class HouseRenderer(ttk.Frame):
         display = f"{emoji} {hhmm}" if emoji else hhmm
 
         m = min(w, h)
-        value_font_size = max(12, int(float(cfg.get("value_scale", 0.075)) * m))
+        ui = self._ui
+        value_font_size = max(12, int(float(cfg.get("value_scale", 0.075)) * m * ui))
         x = w // 2
         y = int(float(cfg.get("y_frac", 0.08)) * h)
 
@@ -581,9 +589,9 @@ class HouseRenderer(ttk.Frame):
         if d.cumulative_score is None:
             return
 
-        m = min(w, h)
-        value_font_size = max(12, int(float(cfg.get("value_scale", 0.10)) * m))
-        gap = int(cfg.get("caption_gap_px", 6))
+        m = min(w, h); ui = self._ui
+        value_font_size = max(12, int(float(cfg.get("value_scale", 0.10)) * m * ui))
+        gap = int(cfg.get("caption_gap_px", 6) * ui)
         y = int(float(cfg.get("y_frac", 0.88)) * h)
         x = w // 2
 
@@ -605,11 +613,12 @@ class HouseRenderer(ttk.Frame):
 
         # caption above the value
         cap = cfg.get("caption", {"fill": "#9fb0c9", "size": 11, "weight": "normal"})
+        cap_size = max(8, int(cap.get("size", 11) * ui))
         self.canvas.create_text(x, y - value_font_size - gap,
-                                text="Cumulative score",
+                                text="Celkové skóre",
                                 anchor="s",
                                 fill=cap.get("fill", "#9fb0c9"),
-                                font=("", int(cap.get("size", 11)), cap.get("weight", "normal")))
+                                font=("", cap_size, cap.get("weight", "normal")))
 
         # draw value with translucent black pill
         # allow score to have its own backdrop settings; fallback to temps backdrop if missing
@@ -623,9 +632,9 @@ class HouseRenderer(ttk.Frame):
         if not cfg or not cfg.get("enabled", True):
             return
 
-        m = min(w, h)
-        value_font_size = max(10, int(float(cfg.get("value_scale", 0.07)) * m))
-        gap = int(cfg.get("caption_gap_px", 6))
+        m = min(w, h); ui = self._ui
+        value_font_size = max(10, int(float(cfg.get("value_scale", 0.07)) * m * ui))
+        gap = int(cfg.get("caption_gap_px", 6) * ui)
         y = int(float(cfg.get("y_frac", 0.88)) * h)
 
         # Left = Comfort | Right = Financial
@@ -638,12 +647,12 @@ class HouseRenderer(ttk.Frame):
         scores = {
             "comfort": {
                 "value": d.comfort_score,
-                "label": "Comfort",
+                "label": "Komfort",
                 "color": cfg.get("pos_color", "#22c55e") if (d.comfort_score or 0) >= 0 else cfg.get("neg_color", "#ef4444"),
             },
             "financial": {
                 "value": d.financial_score,
-                "label": "Financial",
+                "label": "Finanční",
                 "color": cfg.get("pos_color", "#22c55e") if (d.financial_score or 0) >= 0 else cfg.get("neg_color", "#ef4444"),
             }
         }
@@ -653,7 +662,7 @@ class HouseRenderer(ttk.Frame):
             if val is None:
                 continue
             x = side_x[key]
-            signed = f"{val:+.3f}€"
+            signed = f"{val:+.1f}€"
             self.canvas.create_text(x, y - value_font_size - gap,
                                     text=meta["label"],
                                     anchor="s",

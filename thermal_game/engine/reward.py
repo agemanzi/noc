@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 # HACK: Bulgarian scaling constants to match financial units
-BULGARIAN_KWH_SCALING = 75.0       # 1.0 means no change; 100.0 = shift 2 decimal places
-BULGARIAN_EXPORT_SCALING = 1.0      # use if export needs different scaling (optional)
+BULGARIAN_KWH_SCALING = 40.0       # 1.0 means no change; 100.0 = shift 2 decimal places
+BULGARIAN_EXPORT_SCALING = 2.0      # use if export needs different scaling (optional)
 
 @dataclass
 class RewardConfig:

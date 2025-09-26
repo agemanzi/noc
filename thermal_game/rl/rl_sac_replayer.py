@@ -17,6 +17,8 @@ import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import SAC
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import VecNormalize
 
 # Engine deps
 from thermal_game.engine.simulation import SimulationEngine
@@ -24,6 +26,23 @@ from thermal_game.engine.state import GameState, Action
 from thermal_game.engine.settings import GameSettings
 from thermal_game.engine.datafeed import DataFeed
 from thermal_game.engine.reward import RewardConfig
+
+def _unwrap_base_env(vec_env):
+    """
+    Return the underlying ThermalGameEnv from a VecEnv that may be wrapped in:
+    VecNormalize -> (Subproc/Dummy)VecEnv -> Monitor -> ThermalGameEnv
+    """
+    e = vec_env
+    # VecNormalize -> .venv
+    if hasattr(e, "venv"):
+        e = e.venv
+    # Dummy/Subproc -> .envs[0]
+    if hasattr(e, "envs"):
+        e = e.envs[0]
+    # Monitor and any other gym wrappers -> .env chain
+    while hasattr(e, "env"):
+        e = e.env
+    return e
 
 # =========================
 #         CONFIG
@@ -43,8 +62,10 @@ MODEL_BASENAME   = "sac_thermal_game"
 FALLBACK_ZIP     = Path(r"C:\Users\kollmann.marek\Downloads\sac_thermal_game.zip")
 
 # Episode setup (match training)
-START_DATE        = dt.date(2025, 3, 1)
-STEPS_PER_EPISODE = 4 * 24 * 7              # 1 week of 15-min steps
+_app_settings = GameSettings()
+START_DATE        = _app_settings.start_date  # Use same default as app
+GAME_DAYS         = 4                       # Parameterized game length in days
+STEPS_PER_EPISODE = 4 * 24 * GAME_DAYS     # Episodes are GAME_DAYS long (same as runner & app)
 PV_ON             = True
 ALLOW_GRID_CHARGE = True
 SEED              = 0
@@ -71,7 +92,7 @@ class ThermalGameEnv(gym.Env):
         load_csv: str | Path,
         *,
         start_date: dt.date = dt.date(2025, 1, 1),
-        steps_per_episode: int = 4 * 24 * 7,
+        steps_per_episode: int = 4 * 24 * GAME_DAYS,
         pv_on: bool = True,
         allow_grid_charge: bool = True,
         reward_cfg: RewardConfig | None = None,
@@ -288,10 +309,8 @@ def main():
     if not weather_csv.exists() or not load_csv.exists():
         raise FileNotFoundError(f"Missing data files:\n  {weather_csv}\n  {load_csv}")
 
-    # Robust model loading as requested
-    model = _load_sac_model(MODEL_DIR, MODEL_BASENAME, FALLBACK_ZIP)
-
-    env = ThermalGameEnv(
+    # Build the same env stack as runner (1 env for replay)
+    base_env_fn = lambda: ThermalGameEnv(
         str(weather_csv), str(load_csv),
         start_date=START_DATE,
         steps_per_episode=STEPS_PER_EPISODE,
@@ -299,32 +318,55 @@ def main():
         allow_grid_charge=ALLOW_GRID_CHARGE,
         seed=SEED,
     )
+    vec_env = make_vec_env(base_env_fn, n_envs=1, seed=SEED)
 
-    obs, _ = env.reset()
-    done = trunc = False
+    # If stats exist (saved by runner), load them so obs are normalized exactly the same
+    vecnorm_path = MODEL_DIR / "vecnorm_stats.pkl"
+    if vecnorm_path.exists():
+        vec_env = VecNormalize.load(str(vecnorm_path), vec_env)
+        vec_env.training = False
+        vec_env.norm_reward = False
+        print(f">> loaded normalization stats from {vecnorm_path}")
+    else:
+        print(">> no normalization stats found, using raw observations")
+
+    # Robust model loading as requested
+    model = _load_sac_model(MODEL_DIR, MODEL_BASENAME, FALLBACK_ZIP)
+    
+    # Keep a handle to the underlying gym env for logging exogenous/state
+    # (unwrap from VecNormalize -> VecEnv -> Monitor -> ThermalGameEnv)
+    raw_env = _unwrap_base_env(vec_env)
+
+    obs = vec_env.reset()          # VecEnv: obs shape (1, obs_dim)
+    done = np.array([False])
     ep_r = 0.0
     rows = []
 
-    while not (done or trunc):
+    while not done[0]:
         action, _ = model.predict(obs, deterministic=True)
-        # keep the exact action + mapped discrete command
-        hvac = float(np.clip(action[0], -1.0, 1.0))
-        braw = float(np.clip(action[1], -1.0, 1.0))
+
+        # --- NEW: flatten the single-env action ---
+        a = np.asarray(action)
+        if a.ndim == 2:          # shape (1, 2) -> (2,)
+            a = a[0]
+        # now a.shape == (2,)
+        hvac = float(np.clip(a[0], -1.0, 1.0))
+        braw = float(np.clip(a[1], -1.0, 1.0))
         batt_cmd = 1 if braw > 0.33 else (-1 if braw < -0.33 else 0)
+        # ------------------------------------------
 
-        # exogenous used this step (before stepping)
-        row = env.feed.by_time(env.state.t)
-        T_out = float(row.t_out_c)
-        price = float(row.price_eur_per_kwh)
-        base_kw = float(row.base_load_kw)
-        pv_kw = float(row.solar_gen_kw_per_kwp) * float(env.settings.pv_size_kw) if env.pv_on else 0.0
+        # for logging pre-step exogenous, peek into the underlying raw env
+        row_now = raw_env.feed.by_time(raw_env.state.t)
+        T_out = float(row_now.t_out_c)
+        price = float(row_now.price_eur_per_kwh)
+        base_kw = float(row_now.base_load_kw)
+        pv_kw = float(row_now.solar_gen_kw_per_kwp) * float(raw_env.settings.pv_size_kw) if raw_env.pv_on else 0.0
 
-        obs, r, done, trunc, info = env.step(action)
-        ep_r += float(r)
+        obs, reward, done, info = vec_env.step(action)  # keep passing the original (1,2) array
+        ep_r += float(reward[0])
+        info0 = info[0] if isinstance(info, (list, tuple)) and info else {}
 
-        # state after step
-        st = env.state
-
+        st = raw_env.state  # after the step (VecEnv stepped the same underlying env)
         rows.append({
             # timing
             "t": float(st.t),
@@ -339,21 +381,21 @@ def main():
             # actions
             "hvac": hvac,
             "battery_cmd": int(batt_cmd),
-            "action_raw_0": float(action[0]),
-            "action_raw_1": float(action[1]),
+            "action_raw_0": float(a[0]),   # use the flattened action
+            "action_raw_1": float(a[1]),
 
             # key outputs
             "T_inside": float(st.T_inside),
             "soc": float(st.soc),
-            "reward": float(info.get("financial", 0.0) + info.get("comfort", 0.0)),
-            "reward_fin": float(info.get("financial", 0.0)),
-            "reward_comf": float(info.get("comfort", 0.0)),
-            "import_kwh": float(info.get("import_kwh", 0.0)),
-            "export_kwh": float(info.get("export_kwh", 0.0)),
-            "hvac_kw": float(info.get("hvac_kw", 0.0)),
-            "battery_kw": float(info.get("battery_kw", 0.0)),
-            "pv_kw_seen": float(info.get("pv_kw", pv_kw)),
-            "other_kw": float(info.get("other_kw", -base_kw)),
+            "reward": float(info0.get("financial", 0.0) + info0.get("comfort", 0.0)),
+            "reward_fin": float(info0.get("financial", 0.0)),
+            "reward_comf": float(info0.get("comfort", 0.0)),
+            "import_kwh": float(info0.get("import_kwh", 0.0)),
+            "export_kwh": float(info0.get("export_kwh", 0.0)),
+            "hvac_kw": float(info0.get("hvac_kw", 0.0)),
+            "battery_kw": float(info0.get("battery_kw", 0.0)),
+            "pv_kw_seen": float(info0.get("pv_kw", pv_kw)),
+            "other_kw": float(info0.get("other_kw", -base_kw)),
         })
 
     REPLAYS_DIR.mkdir(parents=True, exist_ok=True)

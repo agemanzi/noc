@@ -22,12 +22,20 @@ import datetime as dt
 
 
 from .plots import Charts
-FAST_TICK_MS = 100       # normal speed
+FAST_TICK_MS = 400       # normal speed
 SLOW_TICK_MS = 900      # slow mode speed (tweak to taste)
 RAND = random.Random(42)
 
+# Nudge/hold behavior (smaller, smoother steps)
+HVAC_NUDGE = 0.02            # click left/right or ←/→
+HVAC_SHIFT_NUDGE = 0.06      # Shift + ←/→
+HVAC_HOLD_DELTA = 0.01       # press-and-hold repeat
+HVAC_HOLD_INTERVAL_MS = 60   # repeat speed
+HVAC_QUANTUM = 0.01          # snap increments for nudges/zeroing
+
 class App:
-    def __init__(self, root):
+    def __init__(self, root, *, game_days: int = 3):
+        self.game_days = max(1, int(game_days))
         
         data_dir = Path(__file__).resolve().parent.parent / "data"
         weather_csv = data_dir / "weekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"
@@ -51,7 +59,7 @@ class App:
 
         # --- Game/session trackers ---------------------------------------------------
         self.session_score = 0.0                 # >>> NEW (accumulates reward over the run)
-        self.day_var = tk.StringVar(value="Day 1/7  Score: +0.00 €")  # >>> NEW (HUD text)
+        self.day_var = tk.StringVar(value=f"Day 1/{self.game_days}  Score: +0.00 €")  # >>> NEW (HUD text)
 
         # Persisted scores (JSON) under repo/outputs/scores.json
         self.scores_path = Path(__file__).resolve().parents[2] / "outputs" / "scores.json"  # >>> NEW
@@ -70,7 +78,7 @@ class App:
         self.right.grid(row=0, column=1, sticky="nsew")
         self.controls = ttk.Frame(root, padding=8)
         self.controls.grid(row=1, column=0, columnspan=2, sticky="ew")
-        self.status = ttk.Label(root, anchor="w", text="Status: Ready.")
+        self.status = ttk.Label(root, anchor="w", text="Stav: Připraven.")
         self.status.grid(row=2, column=0, columnspan=2, sticky="ew")
 
         # --- LEFT: House + Devices + Outputs ---------------------------------
@@ -95,6 +103,9 @@ class App:
         # show/hide reward lines on the plots
         self.hide_scores = tk.BooleanVar(value=False)  # unchecked by default (scores shown)
 
+        # show/hide player actions on the actions chart
+        self.hide_actions = tk.BooleanVar(value=False)  # unchecked by default (actions shown)
+
         # smooth chart animations
         self.smooth_plots = tk.BooleanVar(value=True)
 
@@ -109,6 +120,9 @@ class App:
         self.charts = Charts(self.right, comfort=(lo, hi))        
         self.charts.reset_time_axes(clear_buffers=True)  # ensure clean state for initial anchor
         
+        # Set initial visibility states
+        self.charts.set_show_actions(True)
+        
         # play/pause
         self.playing = False
         self._tick_after_id = None
@@ -117,17 +131,18 @@ class App:
         self.root.bind("<F2>", lambda e: self.bat.set(0))
         self.root.bind("<F3>", lambda e: self.bat.set(1))
 
-        # Arrow keys: Left = cool, Right = heat
-        self.root.bind("<Left>",  lambda e: self._hvac_nudge(-0.05))
-        self.root.bind("<Right>", lambda e: self._hvac_nudge(+0.05))
+        # Arrow keys: Left = cool, Right = heat, Down = neutral (0)
+        self.root.bind("<Left>",  lambda e: self._hvac_nudge(-HVAC_NUDGE))
+        self.root.bind("<Right>", lambda e: self._hvac_nudge(+HVAC_NUDGE))
+        self.root.bind("<Down>",  lambda e: self._hvac_set(0.0, quantize=True))  # ← NEW
 
         # Shift+Arrow for bigger steps
-        self.root.bind("<Shift-Left>",  lambda e: self._hvac_nudge(-0.15))
-        self.root.bind("<Shift-Right>", lambda e: self._hvac_nudge(+0.15))
+        self.root.bind("<Shift-Left>",  lambda e: self._hvac_nudge(-HVAC_SHIFT_NUDGE))
+        self.root.bind("<Shift-Right>", lambda e: self._hvac_nudge(+HVAC_SHIFT_NUDGE))
 
-        # Press-and-hold auto-repeat
-        self.root.bind("<KeyPress-Left>",  lambda e: self._hvac_hold_start(-0.03))
-        self.root.bind("<KeyPress-Right>", lambda e: self._hvac_hold_start(+0.03))
+        # Press-and-hold auto-repeat (smaller delta, a bit faster)
+        self.root.bind("<KeyPress-Left>",  lambda e: self._hvac_hold_start(-HVAC_HOLD_DELTA, interval_ms=HVAC_HOLD_INTERVAL_MS))
+        self.root.bind("<KeyPress-Right>", lambda e: self._hvac_hold_start(+HVAC_HOLD_DELTA, interval_ms=HVAC_HOLD_INTERVAL_MS))
         self.root.bind("<KeyRelease-Left>",  self._hvac_hold_stop)
         self.root.bind("<KeyRelease-Right>", self._hvac_hold_stop)
 
@@ -189,7 +204,7 @@ class App:
     def _build_left(self):
         self.house_view = HouseRenderer(
             self.left,
-            width=600, height=1000,
+            width=800, height=1200,
             image_path=os.path.join(os.path.dirname(__file__), "house.png"),
             title="House"
         )
@@ -284,12 +299,12 @@ class App:
         hvac_frame.columnconfigure(1, weight=1)
 
         # click for single nudge
-        btn_left.configure(command=lambda: self._hvac_nudge(-0.05))
-        btn_right.configure(command=lambda: self._hvac_nudge(+0.05))
+        btn_left.configure(command=lambda: self._hvac_nudge(-HVAC_NUDGE))
+        btn_right.configure(command=lambda: self._hvac_nudge(+HVAC_NUDGE))
 
         # press-and-hold repeat on buttons
-        btn_left.bind("<ButtonPress-1>",  lambda e: self._hvac_hold_start(-0.03))
-        btn_right.bind("<ButtonPress-1>", lambda e: self._hvac_hold_start(+0.03))
+        btn_left.bind("<ButtonPress-1>",  lambda e: self._hvac_hold_start(-HVAC_HOLD_DELTA, interval_ms=HVAC_HOLD_INTERVAL_MS))
+        btn_right.bind("<ButtonPress-1>", lambda e: self._hvac_hold_start(+HVAC_HOLD_DELTA, interval_ms=HVAC_HOLD_INTERVAL_MS))
         btn_left.bind("<ButtonRelease-1>",  self._hvac_hold_stop)
         btn_right.bind("<ButtonRelease-1>", self._hvac_hold_stop)
 
@@ -298,43 +313,50 @@ class App:
         # Battery radio group (in a small frame)
         bat_frame = ttk.Frame(self.controls)
         bat_frame.grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Radiobutton(bat_frame, text="Charge", value=-1, variable=self.bat).grid(row=0, column=0, padx=2)
-        ttk.Radiobutton(bat_frame, text="Idle",       value= 0, variable=self.bat).grid(row=0, column=1, padx=2)
-        ttk.Radiobutton(bat_frame, text="Discharge",     value= 1, variable=self.bat).grid(row=0, column=2, padx=2)
-        ttk.Label(self.controls, text="Battery (-1/0/+1)").grid(row=1, column=1)
+        ttk.Radiobutton(bat_frame, text="Nabíjení", value=-1, variable=self.bat).grid(row=0, column=0, padx=2)
+        ttk.Radiobutton(bat_frame, text="Klid",       value= 0, variable=self.bat).grid(row=0, column=1, padx=2)
+        ttk.Radiobutton(bat_frame, text="Vybíjení",     value= 1, variable=self.bat).grid(row=0, column=2, padx=2)
+        ttk.Label(self.controls, text="Baterie (-1/0/+1)").grid(row=1, column=1)
 
         # Buttons
-        ttk.Button(self.controls, text="Step", command=self.step_once).grid(row=0, column=2, padx=6)
-        self.play_btn = ttk.Button(self.controls, text="▶ Play", command=self.toggle_play)
+        ttk.Button(self.controls, text="Krok", command=self.step_once).grid(row=0, column=2, padx=6)
+        self.play_btn = ttk.Button(self.controls, text="▶ Hrát", command=self.toggle_play)
         self.play_btn.grid(row=0, column=3, padx=6)
         ttk.Button(self.controls, text="Reset", command=self.reset).grid(row=0, column=4, padx=6)
         ttk.Button(self.controls, text="Export CSV", command=self.export).grid(row=0, column=5, padx=6)
-        ttk.Button(self.controls, text="⚙ Settings", command=self.open_settings).grid(row=0, column=6, padx=6)
-        ttk.Button(self.controls, text="Load Replay", command=self._load_replay_csv).grid(row=0, column=7, padx=6)
+        ttk.Button(self.controls, text="⚙ Nastavení", command=self.open_settings).grid(row=0, column=6, padx=6)
+        ttk.Button(self.controls, text="Načíst replay", command=self._load_replay_csv).grid(row=0, column=7, padx=6)
         ttk.Checkbutton(self.controls, text="Replay", variable=self.replay_on).grid(row=0, column=8, padx=6)
 
         # NEW: Slow mode checkbox
-        ttk.Checkbutton(self.controls, text="Slow down (Day 1)", variable=self.slow_mode).grid(row=0, column=9, padx=6)
+        ttk.Checkbutton(self.controls, text="Zpomalit (Den 1)", variable=self.slow_mode).grid(row=0, column=9, padx=6)
 
         # NEW: Hide scores checkbox
         ttk.Checkbutton(
-            self.controls, text="Hide scores",
+            self.controls, text="Skrýt skóre",
             variable=self.hide_scores,
             command=self._toggle_scores
         ).grid(row=0, column=10, padx=6)
 
+        # NEW: Hide actions checkbox
+        ttk.Checkbutton(
+            self.controls, text="Skrýt akce",
+            variable=self.hide_actions,
+            command=self._toggle_actions
+        ).grid(row=0, column=11, padx=6)
+
         # NEW: Smooth charts checkbox
         ttk.Checkbutton(
-            self.controls, text="Smooth charts",
+            self.controls, text="Plynulé grafy",
             variable=self.smooth_plots
-        ).grid(row=0, column=11, padx=6)
+        ).grid(row=0, column=12, padx=6)
 
         # >>> NEW: Day/Score HUD on the right side of the controls
         hud = ttk.Label(self.controls, textvariable=self.day_var, anchor="e")
-        hud.grid(row=1, column=11, sticky="e", padx=6)  # moved to last column
+        hud.grid(row=1, column=12, sticky="e", padx=6)  # moved to last column
 
         # stretchy columns
-        for c in range(0, 12):  # was range(0, 11)
+        for c in range(0, 13):  # was range(0, 12)
             self.controls.columnconfigure(c, weight=1)
 
     def _current_tick_delay(self) -> int:
@@ -344,6 +366,10 @@ class App:
         # Charts wants a "show" flag; our checkbox is "hide"
         self.charts.set_show_rewards(not self.hide_scores.get())
 
+    def _toggle_actions(self):
+        # Charts expects a "show" flag; checkbox is "hide"
+        self.charts.set_show_actions(not self.hide_actions.get())
+
 
     # --------- LOOP ----------------------------------------------------------
     # --------- LOOP ----------------------------------------------------------
@@ -351,7 +377,7 @@ class App:
         import csv
         p = Path(path) if path else Path(self.replay_path_default)
         if not p.exists():
-            self.status.config(text=f"Replay file not found: {p}")
+            self.status.config(text=f"Soubor replay nenalezen: {p}")
             return
         rows = []
         with p.open("r", newline="", encoding="utf-8") as f:
@@ -379,13 +405,13 @@ class App:
                     "ts": d.get("ts", None),
                 })
         if not rows:
-            self.status.config(text=f"Replay file is empty: {p}")
+            self.status.config(text=f"Soubor replay je prázdný: {p}")
             return
         self.replay_rows = rows
         self.replay_idx = 0
         self.replay_on.set(True)
         # optional: align feed start if CSV has a timestamp column (we'll still override exogenous)
-        self.status.config(text=f"Replay loaded: {p.name} ({len(rows)} steps)")
+        self.status.config(text=f"Replay načten: {p.name} ({len(rows)} kroků)")
 
     def step_once(self):
         # If replaying, pull next row; else read from UI/Feed
@@ -402,8 +428,8 @@ class App:
             if self.replay_on.get() and self.replay_idx >= len(self.replay_rows) and self.playing:
                 # reached EOF during replay
                 self.playing = False
-                self.play_btn.config(text="▶ Play")
-                self.status.config(text="Status: Replay finished.")
+                self.play_btn.config(text="▶ Hrát")
+                self.status.config(text="Stav: Replay dokončen.")
                 return
 
         # 2) get data row for current sim time
@@ -499,24 +525,21 @@ class App:
         steps_per_day  = int(round(24 * 3600 / tick_seconds))  # 96 for 15-min ticks
         tick_index     = int(round(self.state.t / tick_seconds))
 
-        # 4B) compute day index from ticks (1..7)
+        # 4B) compute day index from ticks (1..game_days)
         day_idx = (tick_index // steps_per_day) + 1
-        if day_idx < 1:
-            day_idx = 1
-        elif day_idx > 7:
-            day_idx = 7
+        day_idx = max(1, min(self.game_days, day_idx))
 
         # NEW: when entering Day 2 (tick_index >= steps_per_day), turn off slow mode once
         if tick_index >= steps_per_day and self.slow_mode.get():
             self.slow_mode.set(False)
             # optional status message:
-            self.status.config(text="Status: Day 2 reached — speeding up.")
+            self.status.config(text="Stav: Dosažen den 2 — zrychlování.")
 
         # update HUD
-        self.day_var.set(f"Day {day_idx}/7  Score: {self.session_score:+.2f} €")
+        self.day_var.set(f"Day {day_idx}/{self.game_days}  Score: {self.session_score:+.2f} €")
 
-        # 4C) end game right after completing 7 full days
-        if tick_index >= steps_per_day * 7:
+        # 4C) end game right after completing game_days full days
+        if tick_index >= steps_per_day * self.game_days:
             self._end_game()
             return
 
@@ -600,13 +623,13 @@ class App:
         ))
 
         # 12) status line
-        self.status.config(text=f"Status: {row.ts:%Y-%m-%d %H:%M}  kWh={self.state.kwh_used:.3f}")
+        self.status.config(text=f"Stav: {row.ts:%Y-%m-%d %H:%M}  kWh={self.state.kwh_used:.3f}")
 
 
 
     def toggle_play(self):
         self.playing = not self.playing
-        self.play_btn.config(text="⏸ Pause" if self.playing else "▶ Play")
+        self.play_btn.config(text="⏸ Pauza" if self.playing else "▶ Hrát")
         if self.playing:
             self._schedule_tick()
 
@@ -626,11 +649,13 @@ class App:
         self.rec = GameRecorder()
         self.charts.reset_time_axes(clear_buffers=True)
         self.session_score = 0.0  # >>> NEW: reset session score
-        self.day_var.set("Day 1/7  Score: +0.00 €")  # >>> NEW: reset day tracker
+        self.day_var.set(f"Day 1/{self.game_days}  Score: +0.00 €")  # >>> NEW: reset day tracker
         self.slow_mode.set(True)  # NEW: start slow again on new game
         self.hide_scores.set(False)  # NEW: reset to show scores on new game
         self.charts.set_show_rewards(True)
-        self.status.config(text="Status: Reset.")
+        self.hide_actions.set(False)  # NEW: reset to show actions on new game
+        self.charts.set_show_actions(True)
+        self.status.config(text="Stav: Reset.")
 
     def _end_game(self):  # >>> NEW
         """Stop the loop and open the save score dialog."""
@@ -639,9 +664,9 @@ class App:
             self.root.after_cancel(self._tick_after_id)
             self._tick_after_id = None
         self.playing = False
-        self.play_btn.config(text="▶ Play")
+        self.play_btn.config(text="▶ Hrát")
 
-        self.status.config(text="Game over! Week complete.")
+        self.status.config(text="Konec hry! Týden dokončen.")
         self._show_save_score_dialog(final=True)
 
     def _show_save_score_dialog(self, final=False):  # >>> NEW
@@ -652,10 +677,10 @@ class App:
         win.resizable(False, False)
         padx = {"padx": 10, "pady": 6}
 
-        ttk.Label(win, text="GAME OVER", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=2, **padx)
-        ttk.Label(win, text=f"Final Score: {self.session_score:+.2f} €", font=("Segoe UI", 12)).grid(row=1, column=0, columnspan=2, **padx)
+        ttk.Label(win, text="KONEC HRY", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=2, **padx)
+        ttk.Label(win, text=f"Konečné skóre: {self.session_score:+.2f} €", font=("Segoe UI", 12)).grid(row=1, column=0, columnspan=2, **padx)
 
-        ttk.Label(win, text="Enter Name/Initials:").grid(row=2, column=0, sticky="e", **padx)
+        ttk.Label(win, text="Zadejte jméno/iniciály:").grid(row=2, column=0, sticky="e", **padx)
         name_var = tk.StringVar(value="AAA")
         name_entry = ttk.Entry(win, textvariable=name_var, width=24)
         name_entry.grid(row=2, column=1, sticky="w", **padx)
@@ -665,7 +690,7 @@ class App:
         board = self._load_scores()
         top = sorted(board, key=lambda r: r.get("score", 0.0), reverse=True)[:5]
         if top:
-            ttk.Label(win, text="Top Scores:", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, columnspan=2, **padx)
+            ttk.Label(win, text="Nejlepší skóre:", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, columnspan=2, **padx)
             text = "\n".join([f"{i+1:>2}. {r.get('name','---'):<10}  {r.get('score',0.0):>+8.2f} €"
                               for i, r in enumerate(top)])
             lbl = ttk.Label(win, text=text, justify="left")
@@ -683,9 +708,9 @@ class App:
 
         btns = ttk.Frame(win)
         btns.grid(row=5, column=0, columnspan=2, sticky="ew", **padx)
-        ttk.Button(btns, text="Save", command=do_save).pack(side="left", padx=4)
-        ttk.Button(btns, text="Save & Restart", command=save_and_restart).pack(side="left", padx=4)
-        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=4)
+        ttk.Button(btns, text="Uložit", command=do_save).pack(side="left", padx=4)
+        ttk.Button(btns, text="Uložit a restartovat", command=save_and_restart).pack(side="left", padx=4)
+        ttk.Button(btns, text="Zrušit", command=win.destroy).pack(side="right", padx=4)
 
     def _load_scores(self):  # >>> NEW
         """Return the list of score dicts from JSON, or [] if missing/invalid."""
@@ -711,13 +736,13 @@ class App:
         try:
             with self.scores_path.open("w", encoding="utf-8") as f:
                 json.dump(board, f, indent=2, ensure_ascii=False)
-            self.status.config(text=f"Score saved for {name}: {entry['score']:+.3f} € → {self.scores_path.name}")
+            self.status.config(text=f"Skóre uloženo pro {name}: {entry['score']:+.3f} € → {self.scores_path.name}")
         except Exception as e:
-            self.status.config(text=f"Failed to save score: {e}")
+            self.status.config(text=f"Nepodařilo se uložit skóre: {e}")
 
     def export(self):
         path = self.rec.export_csv("run.csv")
-        self.status.config(text=f"Status: Saved {path}")
+        self.status.config(text=f"Stav: Uloženo {path}")
         print(f"Saved {path}")
 
     # def _update_badges(self):
@@ -803,7 +828,7 @@ class App:
         r = 0
 
         # ---- Presets row at the very top --------------------------------------
-        ttk.Label(win, text="Presets (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=(8, 4))
+        ttk.Label(win, text="Předvolby (kW)").grid(row=r, column=0, sticky="w", padx=6, pady=(8, 4))
         btns = ttk.Frame(win)
         btns.grid(row=r, column=1, sticky="w", padx=6, pady=(8, 4))
         ttk.Button(btns, text="Small PV / Large Batt",
@@ -896,19 +921,21 @@ class App:
     def _clamp(self, x, lo=-1.0, hi=1.0):  # reuse anywhere
         return max(lo, min(hi, x))
 
-    def _hvac_set(self, val: float):
+    def _hvac_set(self, val: float, quantize: bool = False):
+        if quantize:
+            val = round(val / HVAC_QUANTUM) * HVAC_QUANTUM
         self.hvac.set(self._clamp(val))
 
     def _hvac_nudge(self, delta: float):
-        self._hvac_set(self.hvac.get() + delta)
+        self._hvac_set(self.hvac.get() + delta, quantize=True)
 
-    def _hvac_hold_start(self, delta: float, interval_ms: int = 80):
+    def _hvac_hold_start(self, delta: float, interval_ms: int = HVAC_HOLD_INTERVAL_MS):
         # start repeating nudge while key/mouse is held
         self._hvac_hold_delta = delta
         if getattr(self, "_hvac_hold_after", None):
             self.root.after_cancel(self._hvac_hold_after)
         def tick():
-            self._hvac_nudge(self._hvac_hold_delta)
+            self._hvac_nudge(self._hvac_hold_delta)    # quantized
             self._hvac_hold_after = self.root.after(interval_ms, tick)
         tick()
 
@@ -925,5 +952,5 @@ if __name__ == "__main__":
         ttk.Style().theme_use("clam")
     except tk.TclError:
         pass
-    App(root)
+    App(root, game_days=3)
     root.mainloop()

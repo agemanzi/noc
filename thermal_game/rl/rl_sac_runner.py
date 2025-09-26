@@ -27,11 +27,17 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from torch import nn
+import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
 from stable_baselines3.common.utils import get_linear_fn
+
+# Let the learner (main process) use a handful of threads
+CPU_CORES = os.cpu_count() or 4
+torch.set_num_threads(max(2, CPU_CORES // 3))
+torch.set_num_interop_threads(1)
 
 # Engine deps (available under thermal_game/)
 from thermal_game.engine.simulation import SimulationEngine
@@ -50,16 +56,18 @@ MODEL_DIR = REPO_ROOT / "models"
 WEATHER_CSV_NAME = "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"  # Match GUI data file
 LOAD_CSV_NAME    = "load_profile.csv"
 
-# TIMESTEPS         = 500_000
-TIMESTEPS         = 15_000
+TIMESTEPS         = 500_000
+# TIMESTEPS         = 1_500_000
 # TIMESTEPS         = 1_000_000  # Train longer for better performance
 
-N_ENVS            = 4
-STEPS_PER_EPISODE = 4 * 24 * 7
+# Use as many envs as (cores - 1), minimum 4
+N_ENVS            = max(4, CPU_CORES - 1)
+GAME_DAYS         = 4  # Parameterized game length in days
+STEPS_PER_EPISODE = 4 * 24 * GAME_DAYS
 PV_ON             = True
 ALLOW_GRID_CHARGE = True
 SEED              = 0
-SKIP_TRAINING     = False  # Set to True to skip training and just evaluate existing model
+SKIP_TRAINING     = True  # Set to True to skip training and just evaluate existing model
 
 # =========================
 #   Gymnasium Environment
@@ -78,7 +86,7 @@ class ThermalGameEnv(gym.Env):
         load_csv: str | Path,
         *,
         start_date: dt.date | None = None,
-        steps_per_episode: int = 4 * 24 * 7,
+        steps_per_episode: int = 4 * 24 * GAME_DAYS,
         pv_on: bool = True,
         allow_grid_charge: bool = True,
         reward_cfg: RewardConfig | None = None,
@@ -273,12 +281,22 @@ def run():
     print(f"   comfort_tolerance_occupied_C: {getattr(settings, 'comfort_tolerance_occupied_C', 'NOT SET')}")
     print(f"   comfort_tolerance_unoccupied_C: {getattr(settings, 'comfort_tolerance_unoccupied_C', 'NOT SET')}")
     print(f"   comfort_anchor_eur_per_deg2_hour: {settings.comfort_anchor_eur_per_deg2_hour}")
+    #comfort_inside_bonus_eur_per_step
+    print(f"   comfort_inside_bonus_eur_per_step: {getattr(settings, 'comfort_inside_bonus_eur_per_step', 'NOT SET')}")
     print(f"   export_tariff_ratio: {settings.export_tariff_ratio}")
     print(f"   pv_size_kw: {settings.pv_size_kw}")
     print(f"   hvac_size_kw: {settings.hvac_size_kw}")
     print(f"   batt_size_kwh: {settings.batt_size_kwh}")
     print(f"   start_date: {settings.start_date}")
     print(f"   Data file: {weather_csv.name}")
+    #TIMESTEPS
+    print(f"   Training timesteps: {TIMESTEPS}")
+    #other HARDECODEDS
+    print(f"   Game length: {GAME_DAYS} days")
+    print(f"   Steps per episode: {STEPS_PER_EPISODE}")
+    print(f"   Number of environments: {N_ENVS}")
+    print(f"   Allow grid charging: {ALLOW_GRID_CHARGE}")
+    
     
     # Debug print to confirm defaults
     print(">> Using defaults — hvac_size_kw:", settings.hvac_size_kw,
@@ -297,7 +315,7 @@ def run():
                      steps_per_episode=STEPS_PER_EPISODE,
                      pv_on=PV_ON,
                      allow_grid_charge=ALLOW_GRID_CHARGE),
-            n_envs=N_ENVS, seed=SEED
+            n_envs=N_ENVS, seed=SEED, vec_env_cls=SubprocVecEnv
         )
         
         # Normalize observations; keep economic reward scale
@@ -321,12 +339,13 @@ def run():
             policy="MlpPolicy",
             env=vec_env,
             verbose=1,
+            device="cpu",                # force CPU for consistent threading
             learning_rate=lr_schedule,   # was 3e-4 fixed
             batch_size=512,              # was 256
             tau=0.01,                    # slightly slower target updates (more stable)
             gamma=0.995,
-            train_freq=128,              # was 64
-            gradient_steps=256,          # was 64 (more updates per data)
+            train_freq=256,              # was 128 (scaled up for multi-env)
+            gradient_steps=512,          # was 256 (scaled up for multi-env)
             target_update_interval=1,
             buffer_size=1_000_000,       # was 200k
             learning_starts=10_000,      # ensure buffer is "warmed up"
