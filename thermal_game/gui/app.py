@@ -22,7 +22,8 @@ import datetime as dt
 
 
 from .plots import Charts
-TICKS = 20  # ms between steps when playing
+FAST_TICK_MS = 100       # normal speed
+SLOW_TICK_MS = 900      # slow mode speed (tweak to taste)
 RAND = random.Random(42)
 
 class App:
@@ -85,6 +86,17 @@ class App:
         self.replay_on = tk.BooleanVar(value=False)
         # repo root: .../noc  (two parents up from gui/)
         self.replay_path_default = Path(__file__).resolve().parents[2] / "outputs" / "replays" / "ghost_run.csv"
+
+        # NEW: slow-mode toggle; start slow for Day 1
+        self.slow_mode = tk.BooleanVar(value=True)
+        self._fast_tick_ms = FAST_TICK_MS
+        self._slow_tick_ms = SLOW_TICK_MS
+
+        # show/hide reward lines on the plots
+        self.hide_scores = tk.BooleanVar(value=False)  # unchecked by default (scores shown)
+
+        # smooth chart animations
+        self.smooth_plots = tk.BooleanVar(value=True)
 
         self._build_controls()
 
@@ -251,6 +263,10 @@ class App:
 
     # --------- CONTROLS ------------------------------------------------------
     def _build_controls(self):
+        # Defensive initialization for slow_mode
+        if not hasattr(self, "slow_mode"):
+            self.slow_mode = tk.BooleanVar(value=True)
+        
         self.hvac = tk.DoubleVar(value=0.0)
         self.bat  = tk.IntVar(value=0)          # will be driven by radios: -1 / 0 / +1
 
@@ -297,13 +313,36 @@ class App:
         ttk.Button(self.controls, text="Load Replay", command=self._load_replay_csv).grid(row=0, column=7, padx=6)
         ttk.Checkbutton(self.controls, text="Replay", variable=self.replay_on).grid(row=0, column=8, padx=6)
 
+        # NEW: Slow mode checkbox
+        ttk.Checkbutton(self.controls, text="Slow down (Day 1)", variable=self.slow_mode).grid(row=0, column=9, padx=6)
+
+        # NEW: Hide scores checkbox
+        ttk.Checkbutton(
+            self.controls, text="Hide scores",
+            variable=self.hide_scores,
+            command=self._toggle_scores
+        ).grid(row=0, column=10, padx=6)
+
+        # NEW: Smooth charts checkbox
+        ttk.Checkbutton(
+            self.controls, text="Smooth charts",
+            variable=self.smooth_plots
+        ).grid(row=0, column=11, padx=6)
+
         # >>> NEW: Day/Score HUD on the right side of the controls
         hud = ttk.Label(self.controls, textvariable=self.day_var, anchor="e")
-        hud.grid(row=1, column=8, sticky="e", padx=6)  # reuse right-most column
+        hud.grid(row=1, column=11, sticky="e", padx=6)  # moved to last column
 
         # stretchy columns
-        for c in range(0, 9):
+        for c in range(0, 12):  # was range(0, 11)
             self.controls.columnconfigure(c, weight=1)
+
+    def _current_tick_delay(self) -> int:
+        return self._slow_tick_ms if self.slow_mode.get() else self._fast_tick_ms
+
+    def _toggle_scores(self):
+        # Charts wants a "show" flag; our checkbox is "hide"
+        self.charts.set_show_rewards(not self.hide_scores.get())
 
 
     # --------- LOOP ----------------------------------------------------------
@@ -467,6 +506,12 @@ class App:
         elif day_idx > 7:
             day_idx = 7
 
+        # NEW: when entering Day 2 (tick_index >= steps_per_day), turn off slow mode once
+        if tick_index >= steps_per_day and self.slow_mode.get():
+            self.slow_mode.set(False)
+            # optional status message:
+            self.status.config(text="Status: Day 2 reached — speeding up.")
+
         # update HUD
         self.day_var.set(f"Day {day_idx}/7  Score: {self.session_score:+.2f} €")
 
@@ -504,7 +549,7 @@ class App:
             forecast_data = None
 
         # 11) one charts.update call with everything
-        self.charts.update(step, {
+        payload = {
             "timestamp": row.ts,
             "pv_kw": pv_kw,
             "battery_kw": battery_kw,
@@ -523,7 +568,12 @@ class App:
             "reward":     reward_tot,
 
             "forecast": forecast_data,
-        })
+        }
+        if self.smooth_plots.get():
+            # ~6 frames over ~120 ms looks smooth without being heavy
+            self.charts.update_smooth(step, payload, frames=6, duration_ms=120)
+        else:
+            self.charts.update(step, payload)
 
         self.house_view.update(HouseRenderData(
             timestamp=row.ts,
@@ -564,7 +614,7 @@ class App:
         if not self.playing:
             return
         self.step_once()
-        self._tick_after_id = self.root.after(TICKS, self._schedule_tick)  # ~10 fps
+        self._tick_after_id = self.root.after(self._current_tick_delay(), self._schedule_tick)
 
     def reset(self):
         if self._tick_after_id:
@@ -577,6 +627,9 @@ class App:
         self.charts.reset_time_axes(clear_buffers=True)
         self.session_score = 0.0  # >>> NEW: reset session score
         self.day_var.set("Day 1/7  Score: +0.00 €")  # >>> NEW: reset day tracker
+        self.slow_mode.set(True)  # NEW: start slow again on new game
+        self.hide_scores.set(False)  # NEW: reset to show scores on new game
+        self.charts.set_show_rewards(True)
         self.status.config(text="Status: Reset.")
 
     def _end_game(self):  # >>> NEW

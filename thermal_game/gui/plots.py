@@ -153,6 +153,85 @@ class Charts:
             ax.xaxis.set_major_formatter(fmt)
 
         self._elec_fills = []
+        self._show_rewards = True  # default
+
+        # ---- X-axis windowing (2-day chunks that step by 1 day) ----
+        self.window_days = 2               # visible width
+        self.window_step_days = 1          # jump size when window is "full"
+        self.snap_window_to_midnight = True
+        self._xwin_start = None            # matplotlib date number of left edge
+
+    def set_show_rewards(self, show: bool):
+        self._show_rewards = bool(show)
+
+        # toggle lines
+        for ln in (self.l_reward_fin, self.l_reward_comf, self.l_reward_tot):
+            ln.set_visible(self._show_rewards)
+
+        # toggle right axis visuals (ticks, label, spine, legend)
+        self.ax_reward.yaxis.set_visible(self._show_rewards)
+        self.ax_reward.set_ylabel("Reward (€/step)" if self._show_rewards else "")
+        self.ax_reward.spines["right"].set_visible(self._show_rewards)
+
+        # remove legend if hidden (avoid empty box)
+        leg = self.ax_reward.get_legend()
+        if leg:
+            leg.set_visible(self._show_rewards)
+            if not self._show_rewards:
+                # Matplotlib sometimes still reserves space; removing is safer
+                try:
+                    leg.remove()
+                except Exception:
+                    pass
+        elif self._show_rewards:
+            # restore legend when re-enabled
+            self.ax_reward.legend(loc="upper right")
+
+        # redraw now
+        self.canvas.draw_idle()
+
+    def _days_to_num(self, d):
+        import matplotlib.dates as mdates
+        return d / 1.0  # already in date-num units (kept for clarity)
+
+    def _floor_to_midnight_num(self, dnum):
+        import matplotlib.dates as mdates
+        dt = mdates.num2date(dnum).replace(hour=0, minute=0, second=0, microsecond=0)
+        return mdates.date2num(dt)
+
+    def _set_all_xlim(self, x0, x1):
+        # set on primary axes (sharex takes care of some, but be explicit)
+        for ax in (self.ax_elec, self.ax_actions, self.ax_temp, self.ax_weather,
+                   self.ax_price, self.ax_solar, self.ax_reward):
+            try:
+                ax.set_xlim(x0, x1)
+            except Exception:
+                pass
+
+    def _maybe_update_xwindow(self, latest_dnum):
+        """Ensure a fixed 2-day window that steps forward by 1 day when needed."""
+        import matplotlib.dates as mdates
+        if latest_dnum is None:
+            return
+
+        # Initialize left edge on first sample
+        if self._xwin_start is None:
+            start = latest_dnum
+            if self.snap_window_to_midnight:
+                start = self._floor_to_midnight_num(latest_dnum)
+            self._xwin_start = start
+            self._set_all_xlim(self._xwin_start, self._xwin_start + self.window_days)
+            return
+
+        # Advance window in 1-day hops if latest point is past current window
+        right_edge = self._xwin_start + self.window_days
+        step = self.window_step_days
+        while latest_dnum >= right_edge:
+            self._xwin_start += step
+            right_edge = self._xwin_start + self.window_days
+
+        # Apply limits (no autoscale jitter)
+        self._set_all_xlim(self._xwin_start, right_edge)
 
     def reset_time_axes(self, clear_buffers: bool = True):
         """
@@ -163,6 +242,9 @@ class Charts:
         if clear_buffers:
             for k in self.buf:
                 self.buf[k].clear()
+
+        # 1.5) reset window state
+        self._xwin_start = None
 
         # 2) clear all line/patch artists' data
         for ln in (
@@ -224,6 +306,9 @@ class Charts:
             ax.xaxis.set_major_locator(locator)
             ax.xaxis.set_major_formatter(formatter)
 
+        # keep reward visibility state after reset
+        self.set_show_rewards(self._show_rewards)
+
         # redraw
         self.canvas.draw_idle()
 
@@ -240,6 +325,9 @@ class Charts:
             B["t"].append(mdates.date2num(ts))
         else:
             B["t"].append(mdates.date2num(mdates.num2date(0)) + float(getattr(s, "t", 0.0)) / 86400.0)
+
+        # Update time window after appending timestamp
+        self._maybe_update_xwindow(B["t"][-1] if B["t"] else None)
 
         def nz(x):  # sanitize None -> nan, else float
             return np.nan if x is None else float(x)
@@ -556,3 +644,136 @@ class Charts:
 
         self.ax_weather.relim(); self.ax_weather.autoscale_view(scalex=True, scaley=True)
         self.ax_solar.relim();   self.ax_solar.autoscale_view(scalex=True, scaley=True)
+
+    def _compute_next_sample(self, step_or_state, metrics):
+        """Return the single-sample values we would append for `update()`."""
+        s = getattr(step_or_state, "state", step_or_state)
+        def nz(x):
+            import numpy as np
+            return np.nan if x is None else float(x)
+
+        # time
+        import matplotlib.dates as mdates
+        if metrics.get("timestamp") is not None:
+            t_new = mdates.date2num(metrics["timestamp"])
+        else:
+            t_new = mdates.date2num(mdates.num2date(0)) + float(getattr(s, "t", 0.0)) / 86400.0
+
+        # electricity pieces
+        pv   = nz(metrics.get("pv_kw", 0.0))
+        batt = nz(metrics.get("battery_kw", 0.0))
+        hvac = -nz(metrics.get("hvac_kw", 0.0))   # chart convention: draws negative
+        other= nz(metrics.get("other_kw", 0.0))
+        total = pv + batt + hvac + other
+
+        # actions / externals
+        hvac_act = nz(metrics.get("hvac_act"))
+        batt_act = nz(metrics.get("batt_act"))
+        price    = nz(metrics.get("price"))
+        occ      = nz(metrics.get("occupied"))
+        soc      = float(getattr(s, "soc", metrics.get("soc", float("nan"))))
+
+        # temps
+        Tin = getattr(s, "T_inside", metrics.get("T_inside", float("nan")))
+        Te  = getattr(s, "T_envelope", metrics.get("T_envelope", Tin))
+        Tout= metrics.get("T_outside", getattr(s, "T_outside", float("nan")))
+        solar = metrics.get("solar", float("nan"))
+
+        # rewards
+        import numpy as np
+        r_tot = metrics.get("reward", np.nan)
+        r_fin = metrics.get("reward_fin", -float(metrics.get("net_opex", 0.0)) if r_tot is not np.nan else np.nan)
+        r_com = metrics.get("reward_comf",
+                            (float(r_tot) + float(metrics.get("net_opex", 0.0))) if r_tot is not np.nan else np.nan)
+
+        return {
+            "t": t_new,
+            "pv_kw": pv, "batt_kw": batt, "hvac_kw": hvac, "other_kw": other, "total_kw": total,
+            "hvac_act": hvac_act, "batt_act": batt_act, "price": price, "occupied": occ, "soc": soc,
+            "Tin": Tin, "Te": Te, "Tout": Tout, "solar": solar,
+            "reward": nz(r_tot), "reward_fin": nz(r_fin), "reward_comf": nz(r_com),
+            "_forecast": metrics.get("forecast", None),
+        }
+
+    def _append_sample(self, sample: dict):
+        """Append one sample to buffers (like update does, but single step)."""
+        B = self.buf
+        for k in ("t","pv_kw","batt_kw","hvac_kw","other_kw","total_kw",
+                  "hvac_act","batt_act","price","occupied","soc",
+                  "Tin","Te","Tout","solar","reward_fin","reward_comf","reward"):
+            if k in sample:
+                B[k].append(sample[k])
+        self._forecast = sample.get("_forecast", None)
+
+    def update_smooth(self, step_or_state, metrics, frames=6, duration_ms=120, easing="linear"):
+        """
+        Interpolate between the last point and the new point.
+        Creates `frames` interim samples over `duration_ms` using Tk .after().
+        """
+        # If no prior data, just do a normal update
+        if len(self.buf["t"]) == 0:
+            self.update(step_or_state, metrics)
+            return
+
+        import numpy as np
+        # prev values (last)
+        prev = {k: (self.buf[k][-1] if len(self.buf[k]) else np.nan)
+                for k in self.buf.keys()}
+
+        # target values (what the next update would append)
+        target = self._compute_next_sample(step_or_state, metrics)
+        t0, t1 = prev["t"], target["t"]
+        if not np.isfinite(t0) or not np.isfinite(t1) or t1 <= t0:
+            # fallback if time is weird/non-monotonic
+            self.update(step_or_state, metrics)
+            return
+
+        # simple easing
+        def ease(u):
+            if easing == "quad":     # ease-in-out
+                return 2*u*u if u < 0.5 else 1 - 2*(1-u)*(1-u)
+            return u  # linear
+
+        # build all interim frames (don't touch buffers yet)
+        xs = np.linspace(0.0, 1.0, frames+1)[1:]  # skip 0, end at 1
+        series_keys = ("pv_kw","batt_kw","hvac_kw","other_kw","total_kw",
+                       "hvac_act","batt_act","price","occupied","soc",
+                       "Tin","Te","Tout","solar","reward_fin","reward_comf","reward")
+
+        # per-frame append function
+        widget = self.canvas.get_tk_widget()
+        per_frame_ms = max(1, duration_ms // max(1, frames))
+        self._animating = True
+
+        def do_frame(i=0):
+            u = ease(xs[i])
+            # interpolate one sample
+            samp = {"t": (t0 + u*(t1 - t0)), "_forecast": target["_forecast"]}
+            for k in series_keys:
+                a = prev.get(k, np.nan); b = target.get(k, np.nan)
+                if np.isfinite(a) and np.isfinite(b):
+                    samp[k] = a + u*(b - a)
+                else:
+                    samp[k] = b  # jump if NaN
+
+            # append and draw
+            self._append_sample(samp)
+            self._draw_electricity()
+            self._draw_actions()
+            self._draw_temperature()
+            self._draw_weather()
+            self.canvas.draw_idle()
+
+            # schedule next or finish on exact target (to avoid drift)
+            if i+1 < len(xs):
+                widget.after(per_frame_ms, lambda: do_frame(i+1))
+            else:
+                # ensure final equals target exactly once
+                self._append_sample(target)
+                self._draw_electricity()
+                self._draw_actions()
+                self._draw_temperature()
+                self._draw_weather()
+                self.canvas.draw_idle()
+                self._animating = False
+        do_frame(0)

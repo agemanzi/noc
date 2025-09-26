@@ -1,4 +1,4 @@
-# rl_sac_runner.py
+# rl_sac_extra_learning.py
 from __future__ import annotations
 
 # --- run-from-file friendly path bootstrap (no install needed) ---
@@ -11,9 +11,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 # ---------------------------------------------------------------
 
-import os
+import argparse
 import datetime as dt
 import numpy as np
+
 import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import SAC
@@ -28,24 +29,22 @@ from thermal_game.engine.datafeed import DataFeed
 from thermal_game.engine.reward import RewardConfig
 
 # =========================
-#   CONFIG (edit if needed)
+#   CONFIG (minimal)
 # =========================
 PKG_DIR   = REPO_ROOT / "thermal_game"
-DATA_DIR  = PKG_DIR / "data"   # <-- C:\_projekty_repo\noc\thermal_game\data
+DATA_DIR  = PKG_DIR / "data"
 MODEL_DIR = REPO_ROOT / "models"
 
-WEATHER_CSV_NAME = "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"  # Match GUI data file
+WEATHER_CSV_NAME = "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"
 LOAD_CSV_NAME    = "load_profile.csv"
-
-# TIMESTEPS         = 500_000
-TIMESTEPS         = 150_000
 
 N_ENVS            = 4
 STEPS_PER_EPISODE = 4 * 24 * 7
 PV_ON             = True
 ALLOW_GRID_CHARGE = True
 SEED              = 0
-SKIP_TRAINING     = False  # Set to True to skip training and just evaluate existing model
+
+MODEL_PATH = MODEL_DIR / "sac_thermal_game.zip"   # same as the runner
 
 # =========================
 #   Gymnasium Environment
@@ -95,7 +94,7 @@ class ThermalGameEnv(gym.Env):
         self.pv_on = pv_on
         self.steps_per_episode = int(steps_per_episode)
 
-        # Engine persistence state tracking for realism features
+        # persistence for realism
         self._prev_hvac_kw = 0.0
         self._prev_Tin_measured = None
         self._solar_pop_remaining = 0
@@ -122,8 +121,7 @@ class ThermalGameEnv(gym.Env):
         pv_kw = pv_kwp * float(self.settings.pv_size_kw) if self.pv_on else 0.0
         base_kw = float(row.base_load_kw)
         soc = float(self.state.soc)
-        
-        # Use measured temperature (with sensor lag) if available, else true temperature
+
         T_in = float(self._prev_Tin_measured if self._prev_Tin_measured is not None
                      else self.state.T_inside)
 
@@ -137,18 +135,15 @@ class ThermalGameEnv(gym.Env):
             T_outside=15.0,
             soc=float(np.clip(0.5 + 0.1*self.rng.randn(), 0.1, 0.9)),
             kwh_used=0.0,
-            T_envelope=22.0  # Add envelope temperature for R3C2 model
+            T_envelope=22.0
         )
         self.feed.set_anchor_date(self.settings.start_date)
         self._steps = 0
-        
-        # Reset engine persistence states
         self._prev_hvac_kw = 0.0
-        self._prev_Tin_measured = None  # will be set after first step based on Tin
+        self._prev_Tin_measured = None
         self._solar_pop_remaining = 0
         self._window_event_remaining = 0
         self._step_count = 0
-        
         row = self.feed.by_time(self.state.t)
         obs = self._obs(row, engine_step_metrics=None)
         return obs, {}
@@ -156,7 +151,7 @@ class ThermalGameEnv(gym.Env):
     def step(self, action: np.ndarray):
         self._steps += 1
         self._step_count += 1
-        
+
         a = np.asarray(action, dtype=np.float32)
         hvac = float(np.clip(a[0], -1.0, 1.0))
         b_raw = float(np.clip(a[1], -1.0, 1.0))
@@ -170,7 +165,6 @@ class ThermalGameEnv(gym.Env):
         pv_kw = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on else 0.0
         base_load_kw = float(row.base_load_kw)
 
-        # Recompute reward config with dynamic tolerance based on occupancy
         self.reward_cfg = RewardConfig(
             comfort_target_C=self.settings.comfort_target_C,
             comfort_tolerance_occupied_C=self.settings.comfort_tolerance_occupied_C,
@@ -181,7 +175,6 @@ class ThermalGameEnv(gym.Env):
                if "comfort_inside_bonus" in getattr(RewardConfig, "__dataclass_fields__", {}) else {})
         )
 
-        # Enhanced engine inputs with persistence and realism hooks
         engine_inputs = {
             "ts": row.ts,
             "T_outside": T_outside,
@@ -194,8 +187,6 @@ class ThermalGameEnv(gym.Env):
             "q_internal_kw": 0.7 if occupied else 0.3,
             "q_solar_kw": 0.0,
             "reward_cfg": self.reward_cfg,
-
-            # NEW: persistence & realism hooks
             "prev_hvac_kw": self._prev_hvac_kw,
             "prev_Tin_measured": (self._prev_Tin_measured
                                   if self._prev_Tin_measured is not None
@@ -204,12 +195,11 @@ class ThermalGameEnv(gym.Env):
             "window_event_remaining": self._window_event_remaining,
             "step_count": self._step_count,
         }
-        
+
         step = self.engine.step(self.state, Action(hvac=hvac, battery=battery_cmd), engine_inputs)
         m = step.metrics
         self.state = step.state
 
-        # Pull back persistence state for next step
         self._prev_hvac_kw = float(m.get("prev_hvac_kw", m.get("hvac_kw", 0.0)))
         self._prev_Tin_measured = float(m.get("Tin_measured", self.state.T_inside))
         self._solar_pop_remaining = int(m.get("solar_pop_remaining", 0))
@@ -233,99 +223,92 @@ class ThermalGameEnv(gym.Env):
 #   Helpers
 # =========================
 def make_env(weather_csv: str, load_csv: str, *, seed: int = 0, **env_kwargs):
-    from stable_baselines3.common.monitor import Monitor
     def _f():
         env = ThermalGameEnv(weather_csv=weather_csv, load_csv=load_csv, seed=seed, **env_kwargs)
         return Monitor(env)
     return _f
 
-def run():
-    # Build canonical paths to your real data dir
+def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | None):
+    # Build canonical paths
     weather_csv = DATA_DIR / WEATHER_CSV_NAME
     load_csv    = DATA_DIR / LOAD_CSV_NAME
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Nice error if files are missing
     if not weather_csv.exists() or not load_csv.exists():
         raise FileNotFoundError(
             f"Missing data:\n  {weather_csv}\n  {load_csv}\n"
-            f"Edit DATA_DIR/filenames at top of {Path(__file__).name}."
+            f"Edit filenames at top of {Path(__file__).name}."
         )
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Model not found: {MODEL_PATH}. Train once with rl_sac_runner.py first.")
 
-    # Print current settings for debugging
-    settings = GameSettings()
-    print("\n>> Current GameSettings:")
-    print(f"   comfort_target_C: {settings.comfort_target_C}")
-    print(f"   comfort_tolerance_occupied_C: {getattr(settings, 'comfort_tolerance_occupied_C', 'NOT SET')}")
-    print(f"   comfort_tolerance_unoccupied_C: {getattr(settings, 'comfort_tolerance_unoccupied_C', 'NOT SET')}")
-    print(f"   comfort_anchor_eur_per_deg2_hour: {settings.comfort_anchor_eur_per_deg2_hour}")
-    print(f"   export_tariff_ratio: {settings.export_tariff_ratio}")
-    print(f"   pv_size_kw: {settings.pv_size_kw}")
-    print(f"   hvac_size_kw: {settings.hvac_size_kw}")
-    print(f"   batt_size_kwh: {settings.batt_size_kwh}")
-    print(f"   start_date: {settings.start_date}")
-    print(f"   Data file: {weather_csv.name}")
-    
-    # Debug print to confirm defaults
-    print(">> Using defaults — hvac_size_kw:", settings.hvac_size_kw,
-          " batt_size_kwh:", settings.batt_size_kwh,
-          " pv_size_kw:", settings.pv_size_kw)
-    print()
+    settings = GameSettings()  # use defaults (including start_date)
+    print("\n>> Extra learning setup")
+    print(f"   start_date: {settings.start_date}  pv={settings.pv_size_kw}kW  hvac={settings.hvac_size_kw}kW  batt={settings.batt_size_kwh}kWh")
+    print(f"   model: {MODEL_PATH.name}")
+    print(f"   profile: {'AGGRESSIVE' if aggressive else 'baseline'}")
+    print(f"   extra_steps: {extra_steps:,}\n")
 
-    # Consistent model path with .zip extension
-    model_path = MODEL_DIR / "sac_thermal_game.zip"
-
-    if not SKIP_TRAINING:
-        print(">> training SAC…")
-        vec_env = make_vec_env(
-            make_env(str(weather_csv), str(load_csv),
-                     start_date=settings.start_date,
-                     steps_per_episode=STEPS_PER_EPISODE,
-                     pv_on=PV_ON,
-                     allow_grid_charge=ALLOW_GRID_CHARGE),
-            n_envs=N_ENVS, seed=SEED
-        )
-        model = SAC(
-            policy="MlpPolicy",
-            env=vec_env,
-            verbose=1,
-            learning_rate=3e-4,
-            batch_size=256,
-            tau=0.02,
-            gamma=0.995,
-            train_freq=64,
-            gradient_steps=64,
-            target_update_interval=1,
-            buffer_size=200_000,
-            ent_coef="auto",
-        )
-        model.learn(total_timesteps=TIMESTEPS)
-        model.save(str(model_path))
-        print(f">> saved model → {model_path}")
-    else:
-        print(">> skipping training, loading existing model…")
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model not found: {model_path}. Set SKIP_TRAINING=False to train first.")
-
-    print(">> evaluating one episode…")
-    env = ThermalGameEnv(
-        str(weather_csv), str(load_csv),
-        start_date=settings.start_date,
-        steps_per_episode=STEPS_PER_EPISODE,
-        pv_on=PV_ON,
-        allow_grid_charge=ALLOW_GRID_CHARGE,
-        seed=SEED
+    # Vec env (same boundaries as runner)
+    vec_env = make_vec_env(
+        make_env(str(weather_csv), str(load_csv),
+                 start_date=settings.start_date,
+                 steps_per_episode=STEPS_PER_EPISODE,
+                 pv_on=PV_ON,
+                 allow_grid_charge=ALLOW_GRID_CHARGE),
+        n_envs=N_ENVS, seed=SEED
     )
-    model = SAC.load(str(model_path))
-    obs, info = env.reset()
-    done = False
-    trunc = False
-    ep_r = 0.0
-    while not (done or trunc):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, r, done, trunc, info = env.step(action)
-        ep_r += r
-    print(">> episode reward:", ep_r, "last info:", info)
+
+    # --- Load the existing model and optionally override some hyperparams ---
+    # SB3 lets us override saved hyperparameters with `custom_objects` on load.
+    if aggressive:
+        # A bit spicier: higher LR, more updates per data (train_freq & gradient_steps),
+        # slightly larger batch, encourage exploration (ent_coef).
+        custom = {
+            "learning_rate": 1e-3,          # ↑ from 3e-4
+            "train_freq": 128,              # ↑
+            "gradient_steps": 256,          # ↑
+            "batch_size": 512,              # ↑
+            "tau": 0.02,
+            "gamma": 0.995,
+            "ent_coef": "auto_0.5",         # higher target entropy
+            # buffer_size can be increased on load if you want:
+            # "buffer_size": 400_000,
+        }
+    else:
+        # Keep previous hyperparams as saved
+        custom = {}
+
+    model = SAC.load(
+        str(MODEL_PATH),
+        env=vec_env,
+        custom_objects=custom,  # ← applies aggressive overrides if any
+        device="auto",
+        print_system_info=False,
+    )
+
+    # IMPORTANT: continue counting timesteps instead of resetting to 0
+    model.learn(total_timesteps=int(extra_steps), reset_num_timesteps=False)
+
+    # Save (either overwrite, or with suffix/timestamp)
+    if save_suffix:
+        out_path = MODEL_DIR / f"sac_thermal_game_{save_suffix}.zip"
+    else:
+        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_path = MODEL_DIR / f"sac_thermal_game_cont_{ts}.zip"
+
+    model.save(str(out_path))
+    print(f">> extra learning complete → {out_path}")
+
+def main():
+    p = argparse.ArgumentParser(description="Continue SAC training from existing model.")
+    p.add_argument("--steps", type=int, default=100_000, help="extra timesteps to learn")
+    p.add_argument("--aggressive", action="store_true", help="use a spicier learning profile")
+    p.add_argument("--save-suffix", type=str, default="", help="filename suffix; if empty, timestamp is used")
+    args = p.parse_args()
+
+    suffix = args.save_suffix.strip() or None
+    continue_training(extra_steps=args.steps, aggressive=args.aggressive, save_suffix=suffix)
 
 if __name__ == "__main__":
-    run()
+    main()

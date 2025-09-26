@@ -17,6 +17,9 @@ class RewardConfig:
     # NOTE: units are €/deg²·step (the GUI converts from €/deg²·hour via dt_h)
     comfort_weight: float = 1.5  # increased from 0.5 to make comfort more important
 
+    # NEW: make outside-band hits harsher while occupied (multiplier on the squared term)
+    comfort_outside_occupied_scale: float = 2.0  # 1.0 = old behavior; >1.0 = harsher
+
     # NEW: positive reward when inside the comfort band
     # Paid at the *center* of the band and tapers to 0 at the band edge.
     # Set to 0.0 to disable (default keeps backward compatibility).
@@ -32,14 +35,20 @@ class RewardConfig:
 
 
 def comfort_penalty(T_in: float, occupied: int,
-                    target_C: float, tol_occupied_C: float, tol_unoccupied_C: float = None) -> float:
-    """Squared penalty outside the comfort band; different tolerances for occupied vs unoccupied."""
+                    target_C: float, tol_occupied_C: float, tol_unoccupied_C: float = None,
+                    *, occupied_scale: float = 1.0) -> float:
+    """Squared penalty outside the comfort band; different tolerances for occupied vs unoccupied.
+    When occupied, the penalty is multiplied by `occupied_scale` (>=1 makes it harsher).
+    """
     if tol_unoccupied_C is None:
         tol_unoccupied_C = tol_occupied_C
     
     tol_C = tol_occupied_C if occupied else tol_unoccupied_C
-    diff = abs(T_in - target_C) - tol_C
-    return float(max(0.0, diff)**2)
+    diff_outside = max(0.0, abs(T_in - target_C) - tol_C)
+    penalty = diff_outside ** 2
+    if occupied:
+        penalty *= max(1.0, occupied_scale)
+    return float(penalty)
 
 
 def comfort_bonus(T_in: float, occupied: int,
@@ -121,7 +130,8 @@ def step_reward(*,
     cfg = cfg or RewardConfig()  # safe default (new instance)
 
     cpen = comfort_penalty(Tin_C, occupied, cfg.comfort_target_C, 
-                          cfg.comfort_tolerance_occupied_C, cfg.comfort_tolerance_unoccupied_C)
+                          cfg.comfort_tolerance_occupied_C, cfg.comfort_tolerance_unoccupied_C,
+                          occupied_scale=cfg.comfort_outside_occupied_scale)
     cbon = comfort_bonus(Tin_C, occupied,
                          cfg.comfort_target_C, 
                          cfg.comfort_tolerance_occupied_C, cfg.comfort_tolerance_unoccupied_C,
