@@ -103,10 +103,10 @@ class App:
         self._slow_tick_ms = SLOW_TICK_MS
 
         # show/hide reward lines on the plots
-        self.hide_scores = tk.BooleanVar(value=False)  # unchecked by default (scores shown)
+        self.hide_scores = tk.BooleanVar(value=True)  # unchecked by default (scores shown)
 
         # show/hide player actions on the actions chart
-        self.hide_actions = tk.BooleanVar(value=False)  # unchecked by default (actions shown)
+        self.hide_actions = tk.BooleanVar(value=True)  # unchecked by default (actions shown)
 
         # smooth chart animations
         self.smooth_plots = tk.BooleanVar(value=True)
@@ -649,6 +649,28 @@ class App:
         self.step_once()
         self._tick_after_id = self.root.after(self._current_tick_delay(), self._schedule_tick)
 
+    def _rebuild_charts(self):
+        """Destroy and recreate the Charts panel with current comfort band and visibility flags."""
+        # nuke existing widgets in the right pane
+        for w in self.right.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        # compute comfort band from current settings (occupied tolerance)
+        init_tol = self.settings.comfort_tolerance_occupied_C
+        lo = self.settings.comfort_target_C - init_tol
+        hi = self.settings.comfort_target_C + init_tol
+
+        # recreate charts
+        self.charts = Charts(self.right, comfort=(lo, hi))
+        self.charts.reset_time_axes(clear_buffers=True)
+
+        # re-apply visibility defaults
+        self.charts.set_show_rewards(not self.hide_scores.get())
+        self.charts.set_show_actions(not self.hide_actions.get())
+
     def _reset_for_replay(self, keep_playing: bool = True):
         """Reset sim & UI for another replay pass without clearing loaded CSV."""
         if self._tick_after_id:
@@ -659,7 +681,7 @@ class App:
         self.state = GameState(t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0, T_envelope=22.0)
         self.rec = GameRecorder()
         self.replay_idx = 0
-        self.charts.reset_time_axes(clear_buffers=True)
+        self._rebuild_charts()
         self.session_score = 0.0
         self.day_var.set(f"Day 1/{self.game_days}  Score: +0.00 €")
         self.slow_mode.set(True)
@@ -683,14 +705,16 @@ class App:
         self.play_btn.config(text="▶ Play")
         self.state = GameState(t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0, T_envelope=22.0)
         self.rec = GameRecorder()
-        self.charts.reset_time_axes(clear_buffers=True)
+        self._rebuild_charts()
         self.session_score = 0.0  # >>> NEW: reset session score
         self.day_var.set(f"Day 1/{self.game_days}  Score: +0.00 €")  # >>> NEW: reset day tracker
         self.slow_mode.set(True)  # NEW: start slow again on new game
-        self.hide_scores.set(False)  # NEW: reset to show scores on new game
-        self.charts.set_show_rewards(True)
-        self.hide_actions.set(False)  # NEW: reset to show actions on new game
-        self.charts.set_show_actions(True)
+
+        # keep defaults ON on fresh reset
+        self.hide_scores.set(True)
+        self.hide_actions.set(True)
+        self.charts.set_show_rewards(False)
+        self.charts.set_show_actions(False)
         self.status.config(text="Stav: Reset.")
 
     def _end_game(self):  # >>> NEW

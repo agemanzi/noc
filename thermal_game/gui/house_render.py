@@ -639,7 +639,7 @@ class HouseRenderer(ttk.Frame):
 
         # Left = Comfort | Right = Financial
         side_x = {
-            "comfort": int(w * 0.18),    # left
+            "comfort": int(w * 0.18),    # left 
             "financial": int(w * 0.82),  # right
         }
 
