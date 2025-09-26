@@ -1,6 +1,16 @@
 # rl_sac_extra_learning.py
 from __future__ import annotations
 
+# Prevent thread oversubscription (env workers × BLAS threads)
+# Set NUM_* threads before importing numpy/torch so each worker uses 1 BLAS thread
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")   # macOS
+os.environ.setdefault("BLIS_NUM_THREADS", "1")
+
 # --- run-from-file friendly path bootstrap (no install needed) ---
 import sys
 from pathlib import Path
@@ -22,7 +32,7 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import VecNormalize
-from stable_baselines3.common.utils import get_linear_fn
+from stable_baselines3.common.utils import LinearSchedule
 
 # Engine deps (available under thermal_game/)
 from thermal_game.engine.simulation import SimulationEngine
@@ -42,7 +52,8 @@ WEATHER_CSV_NAME = "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_202
 LOAD_CSV_NAME    = "load_profile.csv"
 
 N_ENVS            = 4
-STEPS_PER_EPISODE = 4 * 24 * 7
+GAME_DAYS         = 4
+STEPS_PER_EPISODE = 4 * 24 * GAME_DAYS
 PV_ON             = True
 ALLOW_GRID_CHARGE = True
 SEED              = 0
@@ -66,7 +77,7 @@ class ThermalGameEnv(gym.Env):
         load_csv: str | Path,
         *,
         start_date: dt.date | None = None,
-        steps_per_episode: int = 4 * 24 * 7,
+        steps_per_episode: int = 4 * 24 * GAME_DAYS,
         pv_on: bool = True,
         allow_grid_charge: bool = True,
         reward_cfg: RewardConfig | None = None,
@@ -283,12 +294,8 @@ def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | Non
     # Update the parameters to match the improved runner defaults
     if aggressive:
         # Even more aggressive than runner defaults
-        lr_schedule = get_linear_fn(2e-3, 5e-4, 1.0)  # Higher learning rate schedule
-        policy_kwargs = dict(
-            net_arch=[1024, 1024],    # Larger network for aggressive mode
-            activation_fn=nn.ReLU,
-            use_sde=True,
-        )
+        lr_schedule = LinearSchedule(2e-3, 5e-4, extra_steps)
+        # DO NOT change policy_kwargs when loading from existing model
         custom = {
             "learning_rate": lr_schedule,
             "train_freq": 256,              # More frequent updates
@@ -299,29 +306,24 @@ def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | Non
             "ent_coef": "auto_0.2",         # Higher exploration than runner
             "buffer_size": 1_500_000,       # Larger buffer
             "learning_starts": 15_000,
-            "sde_sample_freq": 2,           # More frequent exploration noise sampling
-            "policy_kwargs": policy_kwargs,
+            "sde_sample_freq": 2,           # Harmless even if use_sde=False
+            # DO NOT pass "policy_kwargs" when loading from existing .zip
         }
     else:
         # Match the runner's improved baseline parameters
-        lr_schedule = get_linear_fn(1e-3, 3e-4, 1.0)
-        policy_kwargs = dict(
-            net_arch=[512, 512],
-            activation_fn=nn.ReLU,
-            use_sde=True,
-        )
+        lr_schedule = LinearSchedule(1e-3, 3e-4, extra_steps)
         custom = {
             "learning_rate": lr_schedule,
-            "train_freq": 128,
-            "gradient_steps": 256,
+            "train_freq": 256,              # Match runner's baseline
+            "gradient_steps": 512,          # Match runner's baseline
             "batch_size": 512,
             "tau": 0.01,
             "gamma": 0.995,
             "ent_coef": "auto_0.1",         # Match runner's lower entropy
             "buffer_size": 1_000_000,
             "learning_starts": 10_000,
-            "sde_sample_freq": 4,
-            "policy_kwargs": policy_kwargs,
+            "sde_sample_freq": 4,           # Harmless even if use_sde=False
+            # DO NOT pass "policy_kwargs" when loading from existing .zip
         }
 
     model = SAC.load(

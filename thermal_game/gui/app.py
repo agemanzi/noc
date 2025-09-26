@@ -92,6 +92,8 @@ class App:
         self.replay_rows = []
         self.replay_idx = 0
         self.replay_on = tk.BooleanVar(value=False)
+        self.replay_loop = tk.BooleanVar(value=False)   # loop the replay CSV
+        self.suppress_score = tk.BooleanVar(value=True) # skip score dialog by default during replay
         # repo root: .../noc  (two parents up from gui/)
         self.replay_path_default = Path(__file__).resolve().parents[2] / "outputs" / "replays" / "ghost_run.csv"
 
@@ -351,12 +353,16 @@ class App:
             variable=self.smooth_plots
         ).grid(row=0, column=12, padx=6)
 
+        # NEW: Replay loop controls
+        ttk.Checkbutton(self.controls, text="Loop replay", variable=self.replay_loop).grid(row=0, column=13, padx=6)
+        ttk.Checkbutton(self.controls, text="No score dialog", variable=self.suppress_score).grid(row=0, column=14, padx=6)
+
         # >>> NEW: Day/Score HUD on the right side of the controls
         hud = ttk.Label(self.controls, textvariable=self.day_var, anchor="e")
-        hud.grid(row=1, column=12, sticky="e", padx=6)  # moved to last column
+        hud.grid(row=1, column=14, sticky="e", padx=6)  # moved to last column
 
         # stretchy columns
-        for c in range(0, 13):  # was range(0, 12)
+        for c in range(0, 15):  # expanded range
             self.controls.columnconfigure(c, weight=1)
 
     def _current_tick_delay(self) -> int:
@@ -427,9 +433,13 @@ class App:
             action = Action(hvac=self.hvac.get(), battery=int(self.bat.get()))
             if self.replay_on.get() and self.replay_idx >= len(self.replay_rows) and self.playing:
                 # reached EOF during replay
-                self.playing = False
-                self.play_btn.config(text="▶ Hrát")
-                self.status.config(text="Stav: Replay dokončen.")
+                if self.replay_loop.get():
+                    # restart immediately without score dialog
+                    self._reset_for_replay(keep_playing=True)
+                else:
+                    self.playing = False
+                    self.play_btn.config(text="▶ Hrát")
+                    self.status.config(text="Stav: Replay dokončen.")
                 return
 
         # 2) get data row for current sim time
@@ -639,6 +649,32 @@ class App:
         self.step_once()
         self._tick_after_id = self.root.after(self._current_tick_delay(), self._schedule_tick)
 
+    def _reset_for_replay(self, keep_playing: bool = True):
+        """Reset sim & UI for another replay pass without clearing loaded CSV."""
+        if self._tick_after_id:
+            self.root.after_cancel(self._tick_after_id)
+            self._tick_after_id = None
+
+        # soft reset of game state (do not clear self.replay_rows)
+        self.state = GameState(t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0, T_envelope=22.0)
+        self.rec = GameRecorder()
+        self.replay_idx = 0
+        self.charts.reset_time_axes(clear_buffers=True)
+        self.session_score = 0.0
+        self.day_var.set(f"Day 1/{self.game_days}  Score: +0.00 €")
+        self.slow_mode.set(True)
+        self.hide_scores.set(False); self.charts.set_show_rewards(True)
+        self.hide_actions.set(False); self.charts.set_show_actions(True)
+
+        self.status.config(text="Replay: restarted")
+        if keep_playing:
+            self.playing = True
+            self.play_btn.config(text="⏸ Pauza")
+            self._schedule_tick()
+        else:
+            self.playing = False
+            self.play_btn.config(text="▶ Hrát")
+
     def reset(self):
         if self._tick_after_id:
             self.root.after_cancel(self._tick_after_id)
@@ -658,8 +694,23 @@ class App:
         self.status.config(text="Stav: Reset.")
 
     def _end_game(self):  # >>> NEW
-        """Stop the loop and open the save score dialog."""
-        # Stop the tick loop and reset play button
+        """Stop the loop and open the save score dialog (unless suppressed)."""
+        # If we're replaying and loop is enabled → auto-restart with no dialog.
+        if self.replay_on.get() and self.replay_loop.get():
+            self._reset_for_replay(keep_playing=True)
+            return
+
+        # Or if user explicitly asked to suppress dialogs
+        if self.suppress_score.get():
+            if self._tick_after_id:
+                self.root.after_cancel(self._tick_after_id)
+                self._tick_after_id = None
+            self.playing = False
+            self.play_btn.config(text="▶ Hrát")
+            self.status.config(text="Konec hry! (dialog potlačen)")
+            return
+
+        # original behavior
         if self._tick_after_id:
             self.root.after_cancel(self._tick_after_id)
             self._tick_after_id = None

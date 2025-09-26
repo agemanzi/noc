@@ -32,7 +32,7 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv
-from stable_baselines3.common.utils import get_linear_fn
+from stable_baselines3.common.utils import LinearSchedule
 
 # Let the learner (main process) use a handful of threads
 CPU_CORES = os.cpu_count() or 4
@@ -56,7 +56,7 @@ MODEL_DIR = REPO_ROOT / "models"
 WEATHER_CSV_NAME = "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"  # Match GUI data file
 LOAD_CSV_NAME    = "load_profile.csv"
 
-TIMESTEPS         = 500_000
+TIMESTEPS         = 1_000
 # TIMESTEPS         = 1_500_000
 # TIMESTEPS         = 1_000_000  # Train longer for better performance
 
@@ -67,7 +67,7 @@ STEPS_PER_EPISODE = 4 * 24 * GAME_DAYS
 PV_ON             = True
 ALLOW_GRID_CHARGE = True
 SEED              = 0
-SKIP_TRAINING     = True  # Set to True to skip training and just evaluate existing model
+SKIP_TRAINING     = False  # Set to True to skip training and just evaluate existing model
 
 # =========================
 #   Gymnasium Environment
@@ -327,7 +327,7 @@ def run():
         )
 
         # Linear LR schedule: 1e-3 -> 3e-4 over training
-        lr_schedule = get_linear_fn(1e-3, 3e-4, 1.0)
+        lr_schedule = LinearSchedule(1e-3, 3e-4, TIMESTEPS)
 
         policy_kwargs = dict(
             net_arch=[512, 512],      # bigger policy network
