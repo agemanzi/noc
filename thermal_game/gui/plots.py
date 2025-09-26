@@ -299,12 +299,12 @@ class Charts:
         self.ax_temp.set_ylim(15, 30)
         self.ax_elec.set_ylim(-10, 10)
 
-        # ensure date locator/formatter is still set
-        locator = mdates.AutoDateLocator()
-        formatter = mdates.ConciseDateFormatter(locator)
+        # ensure date locator/formatter is still set - use daily ticks for 2-day window
+        day_locator = mdates.DayLocator(interval=1)
+        day_fmt = mdates.ConciseDateFormatter(day_locator)
         for ax in (self.ax_elec, self.ax_actions, self.ax_temp, self.ax_weather):
-            ax.xaxis.set_major_locator(locator)
-            ax.xaxis.set_major_formatter(formatter)
+            ax.xaxis.set_major_locator(day_locator)
+            ax.xaxis.set_major_formatter(day_fmt)
 
         # keep reward visibility state after reset
         self.set_show_rewards(self._show_rewards)
@@ -758,6 +758,7 @@ class Charts:
 
             # append and draw
             self._append_sample(samp)
+            self._maybe_update_xwindow(samp["t"])
             self._draw_electricity()
             self._draw_actions()
             self._draw_temperature()
@@ -770,6 +771,7 @@ class Charts:
             else:
                 # ensure final equals target exactly once
                 self._append_sample(target)
+                self._maybe_update_xwindow(target["t"])
                 self._draw_electricity()
                 self._draw_actions()
                 self._draw_temperature()

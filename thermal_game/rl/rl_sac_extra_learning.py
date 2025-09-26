@@ -17,9 +17,12 @@ import numpy as np
 
 import gymnasium as gym
 from gymnasium import spaces
+from torch import nn
 from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.utils import get_linear_fn
 
 # Engine deps (available under thermal_game/)
 from thermal_game.engine.simulation import SimulationEngine
@@ -228,7 +231,7 @@ def make_env(weather_csv: str, load_csv: str, *, seed: int = 0, **env_kwargs):
         return Monitor(env)
     return _f
 
-def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | None):
+def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | None, update_main: bool = True):
     # Build canonical paths
     weather_csv = DATA_DIR / WEATHER_CSV_NAME
     load_csv    = DATA_DIR / LOAD_CSV_NAME
@@ -249,7 +252,7 @@ def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | Non
     print(f"   profile: {'AGGRESSIVE' if aggressive else 'baseline'}")
     print(f"   extra_steps: {extra_steps:,}\n")
 
-    # Vec env (same boundaries as runner)
+    # Vec env with normalization (same as runner)
     vec_env = make_vec_env(
         make_env(str(weather_csv), str(load_csv),
                  start_date=settings.start_date,
@@ -258,31 +261,73 @@ def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | Non
                  allow_grid_charge=ALLOW_GRID_CHARGE),
         n_envs=N_ENVS, seed=SEED
     )
+    
+    # Load normalization stats if they exist
+    vecnorm_path = MODEL_DIR / "vecnorm_stats.pkl"
+    if vecnorm_path.exists():
+        vec_env = VecNormalize.load(vecnorm_path, vec_env)
+        vec_env.training = True  # Keep training mode for continued learning
+        vec_env.norm_reward = False
+        print(f"   loaded normalization stats from {vecnorm_path.name}")
+    else:
+        # Apply normalization like in the runner if stats don't exist yet
+        vec_env = VecNormalize(
+            vec_env,
+            norm_obs=True,
+            norm_reward=False,        # keep true € scale
+            clip_obs=10.0
+        )
+        print("   applied fresh normalization (no existing stats)")
 
     # --- Load the existing model and optionally override some hyperparams ---
-    # SB3 lets us override saved hyperparameters with `custom_objects` on load.
+    # Update the parameters to match the improved runner defaults
     if aggressive:
-        # A bit spicier: higher LR, more updates per data (train_freq & gradient_steps),
-        # slightly larger batch, encourage exploration (ent_coef).
+        # Even more aggressive than runner defaults
+        lr_schedule = get_linear_fn(2e-3, 5e-4, 1.0)  # Higher learning rate schedule
+        policy_kwargs = dict(
+            net_arch=[1024, 1024],    # Larger network for aggressive mode
+            activation_fn=nn.ReLU,
+            use_sde=True,
+        )
         custom = {
-            "learning_rate": 1e-3,          # ↑ from 3e-4
-            "train_freq": 128,              # ↑
-            "gradient_steps": 256,          # ↑
-            "batch_size": 512,              # ↑
-            "tau": 0.02,
+            "learning_rate": lr_schedule,
+            "train_freq": 256,              # More frequent updates
+            "gradient_steps": 512,          # More gradient steps
+            "batch_size": 1024,             # Larger batches
+            "tau": 0.01,
             "gamma": 0.995,
-            "ent_coef": "auto_0.5",         # higher target entropy
-            # buffer_size can be increased on load if you want:
-            # "buffer_size": 400_000,
+            "ent_coef": "auto_0.2",         # Higher exploration than runner
+            "buffer_size": 1_500_000,       # Larger buffer
+            "learning_starts": 15_000,
+            "sde_sample_freq": 2,           # More frequent exploration noise sampling
+            "policy_kwargs": policy_kwargs,
         }
     else:
-        # Keep previous hyperparams as saved
-        custom = {}
+        # Match the runner's improved baseline parameters
+        lr_schedule = get_linear_fn(1e-3, 3e-4, 1.0)
+        policy_kwargs = dict(
+            net_arch=[512, 512],
+            activation_fn=nn.ReLU,
+            use_sde=True,
+        )
+        custom = {
+            "learning_rate": lr_schedule,
+            "train_freq": 128,
+            "gradient_steps": 256,
+            "batch_size": 512,
+            "tau": 0.01,
+            "gamma": 0.995,
+            "ent_coef": "auto_0.1",         # Match runner's lower entropy
+            "buffer_size": 1_000_000,
+            "learning_starts": 10_000,
+            "sde_sample_freq": 4,
+            "policy_kwargs": policy_kwargs,
+        }
 
     model = SAC.load(
         str(MODEL_PATH),
         env=vec_env,
-        custom_objects=custom,  # ← applies aggressive overrides if any
+        custom_objects=custom,  # ← applies improved parameters
         device="auto",
         print_system_info=False,
     )
@@ -293,22 +338,46 @@ def continue_training(extra_steps: int, aggressive: bool, save_suffix: str | Non
     # Save (either overwrite, or with suffix/timestamp)
     if save_suffix:
         out_path = MODEL_DIR / f"sac_thermal_game_{save_suffix}.zip"
+        vecnorm_out = MODEL_DIR / f"vecnorm_stats_{save_suffix}.pkl"
     else:
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         out_path = MODEL_DIR / f"sac_thermal_game_cont_{ts}.zip"
+        vecnorm_out = MODEL_DIR / f"vecnorm_stats_cont_{ts}.pkl"
 
     model.save(str(out_path))
+    
+    # Save updated normalization stats
+    vec_env.save(vecnorm_out)
     print(f">> extra learning complete → {out_path}")
+    print(f">> updated normalization stats → {vecnorm_out}")
+    
+    # If no suffix provided and we want to update the main model, also save to default names
+    if not save_suffix and update_main:
+        main_model_path = MODEL_DIR / "sac_thermal_game.zip"
+        main_vecnorm_path = MODEL_DIR / "vecnorm_stats.pkl"
+        model.save(str(main_model_path))
+        vec_env.save(main_vecnorm_path)
+        print(f">> also updated main model → {main_model_path}")
+        print(f">> also updated main vecnorm → {main_vecnorm_path}")
 
 def main():
-    p = argparse.ArgumentParser(description="Continue SAC training from existing model.")
+    p = argparse.ArgumentParser(description="Continue SAC training from existing model with improved parameters.")
     p.add_argument("--steps", type=int, default=100_000, help="extra timesteps to learn")
-    p.add_argument("--aggressive", action="store_true", help="use a spicier learning profile")
-    p.add_argument("--save-suffix", type=str, default="", help="filename suffix; if empty, timestamp is used")
+    p.add_argument("--aggressive", action="store_true", 
+                  help="use aggressive learning profile (larger network, higher LR, more updates)")
+    p.add_argument("--save-suffix", type=str, default="", 
+                  help="filename suffix; if empty, timestamp is used and main model is also updated")
+    p.add_argument("--no-update-main", action="store_true", 
+                  help="don't update the main model files when using timestamp")
     args = p.parse_args()
 
     suffix = args.save_suffix.strip() or None
-    continue_training(extra_steps=args.steps, aggressive=args.aggressive, save_suffix=suffix)
+    continue_training(
+        extra_steps=args.steps, 
+        aggressive=args.aggressive, 
+        save_suffix=suffix,
+        update_main=not args.no_update_main
+    )
 
 if __name__ == "__main__":
     main()

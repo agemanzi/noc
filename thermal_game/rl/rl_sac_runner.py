@@ -1,6 +1,16 @@
 # rl_sac_runner.py
 from __future__ import annotations
 
+# Prevent thread oversubscription (env workers × BLAS threads)
+# Set NUM_* threads before importing numpy/torch so each worker uses 1 BLAS thread
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")   # macOS
+os.environ.setdefault("BLIS_NUM_THREADS", "1")
+
 # --- run-from-file friendly path bootstrap (no install needed) ---
 import sys
 from pathlib import Path
@@ -16,9 +26,12 @@ import datetime as dt
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+from torch import nn
 from stable_baselines3 import SAC
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.utils import get_linear_fn
 
 # Engine deps (available under thermal_game/)
 from thermal_game.engine.simulation import SimulationEngine
@@ -38,7 +51,8 @@ WEATHER_CSV_NAME = "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_202
 LOAD_CSV_NAME    = "load_profile.csv"
 
 # TIMESTEPS         = 500_000
-TIMESTEPS         = 150_000
+TIMESTEPS         = 15_000
+# TIMESTEPS         = 1_000_000  # Train longer for better performance
 
 N_ENVS            = 4
 STEPS_PER_EPISODE = 4 * 24 * 7
@@ -285,47 +299,91 @@ def run():
                      allow_grid_charge=ALLOW_GRID_CHARGE),
             n_envs=N_ENVS, seed=SEED
         )
+        
+        # Normalize observations; keep economic reward scale
+        vec_env = VecNormalize(
+            vec_env,
+            norm_obs=True,
+            norm_reward=False,        # keep true € scale
+            clip_obs=10.0
+        )
+
+        # Linear LR schedule: 1e-3 -> 3e-4 over training
+        lr_schedule = get_linear_fn(1e-3, 3e-4, 1.0)
+
+        policy_kwargs = dict(
+            net_arch=[512, 512],      # bigger policy network
+            activation_fn=nn.ReLU,
+            use_sde=True,             # gSDE for better exploration
+        )
+
         model = SAC(
             policy="MlpPolicy",
             env=vec_env,
             verbose=1,
-            learning_rate=3e-4,
-            batch_size=256,
-            tau=0.02,
+            learning_rate=lr_schedule,   # was 3e-4 fixed
+            batch_size=512,              # was 256
+            tau=0.01,                    # slightly slower target updates (more stable)
             gamma=0.995,
-            train_freq=64,
-            gradient_steps=64,
+            train_freq=128,              # was 64
+            gradient_steps=256,          # was 64 (more updates per data)
             target_update_interval=1,
-            buffer_size=200_000,
-            ent_coef="auto",
+            buffer_size=1_000_000,       # was 200k
+            learning_starts=10_000,      # ensure buffer is "warmed up"
+            ent_coef="auto_0.1",         # lower entropy target → more decisive policy
+            sde_sample_freq=4,           # resample exploration noise every few steps
+            policy_kwargs=policy_kwargs,
         )
+        
         model.learn(total_timesteps=TIMESTEPS)
         model.save(str(model_path))
+        
+        # Save the normalization statistics with the model
+        vec_env.save(MODEL_DIR / "vecnorm_stats.pkl")
         print(f">> saved model → {model_path}")
+        print(f">> saved normalization stats → {MODEL_DIR / 'vecnorm_stats.pkl'}")
     else:
         print(">> skipping training, loading existing model…")
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found: {model_path}. Set SKIP_TRAINING=False to train first.")
 
     print(">> evaluating one episode…")
-    env = ThermalGameEnv(
-        str(weather_csv), str(load_csv),
-        start_date=settings.start_date,
-        steps_per_episode=STEPS_PER_EPISODE,
-        pv_on=PV_ON,
-        allow_grid_charge=ALLOW_GRID_CHARGE,
-        seed=SEED
+    
+    # Create evaluation environment with normalization
+    eval_env = make_vec_env(
+        make_env(str(weather_csv), str(load_csv),
+                 start_date=settings.start_date,
+                 steps_per_episode=STEPS_PER_EPISODE,
+                 pv_on=PV_ON,
+                 allow_grid_charge=ALLOW_GRID_CHARGE),
+        n_envs=1, seed=SEED
     )
-    model = SAC.load(str(model_path))
-    obs, info = env.reset()
-    done = False
-    trunc = False
+    
+    # Load normalization stats if they exist
+    vecnorm_path = MODEL_DIR / "vecnorm_stats.pkl"
+    if vecnorm_path.exists():
+        eval_env = VecNormalize.load(vecnorm_path, eval_env)
+        eval_env.training = False
+        eval_env.norm_reward = False
+        print(f">> loaded normalization stats from {vecnorm_path}")
+    else:
+        print(">> no normalization stats found, using raw environment")
+    
+    model = SAC.load(str(model_path), env=eval_env)
+    
+    obs = eval_env.reset()                # ✅ VecEnv.reset() returns only obs
+    done = np.array([False])              # VecEnv done flag is an array
     ep_r = 0.0
-    while not (done or trunc):
+    final_info = None
+
+    while not done[0]:
         action, _ = model.predict(obs, deterministic=True)
-        obs, r, done, trunc, info = env.step(action)
-        ep_r += r
-    print(">> episode reward:", ep_r, "last info:", info)
+        obs, reward, done, info = eval_env.step(action)   # ✅ VecEnv API: (obs, rewards, dones, infos)
+        ep_r += float(reward[0])
+        if isinstance(info, (list, tuple)) and len(info) > 0 and info[0]:
+            final_info = info[0]
+
+    print(">> episode reward:", ep_r, "last info:", final_info)
 
 if __name__ == "__main__":
     run()
