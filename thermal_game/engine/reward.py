@@ -4,6 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+# HACK: Bulgarian scaling constants to match financial units
+BULGARIAN_KWH_SCALING = 75.0       # 1.0 means no change; 100.0 = shift 2 decimal places
+BULGARIAN_EXPORT_SCALING = 1.0      # use if export needs different scaling (optional)
+
 @dataclass
 class RewardConfig:
     # comfort
@@ -52,8 +56,8 @@ def comfort_bonus(T_in: float, occupied: int,
 def opex_terms(import_kwh: float, export_kwh: float,
                import_price: float, export_price: float) -> dict:
     """Return import cost (>0), export credit (>0), and net opex (=cost-credit)."""
-    imp_cost = max(0.0, import_kwh) * max(0.0, import_price)
-    exp_cred = max(0.0, export_kwh) * max(0.0, export_price)
+    imp_cost = max(0.0, import_kwh) * max(0.0, import_price) * BULGARIAN_KWH_SCALING
+    exp_cred = max(0.0, export_kwh) * max(0.0, export_price) * BULGARIAN_KWH_SCALING * BULGARIAN_EXPORT_SCALING
     return {
         "import_cost": imp_cost,
         "export_credit": exp_cred,

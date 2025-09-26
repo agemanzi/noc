@@ -22,15 +22,15 @@ import datetime as dt
 
 
 from .plots import Charts
-TICKS = 600  # ms between steps when playing
+TICKS = 100  # ms between steps when playing
 RAND = random.Random(42)
 
 class App:
     def __init__(self, root):
         
         data_dir = Path(__file__).resolve().parent.parent / "data"
-        weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01_old copy 2.csv"
-        # weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01_old - Copy.csv"
+        weather_csv = data_dir / "weekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"
+        # weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01.csv"
 
 
         
@@ -47,6 +47,14 @@ class App:
         self.state = GameState(
             t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0
         )
+
+        # --- Game/session trackers ---------------------------------------------------
+        self.session_score = 0.0                 # >>> NEW (accumulates reward over the run)
+        self.day_var = tk.StringVar(value="Day 1/7  Score: +0.00 €")  # >>> NEW (HUD text)
+
+        # Persisted scores (JSON) under repo/outputs/scores.json
+        self.scores_path = Path(__file__).resolve().parents[2] / "outputs" / "scores.json"  # >>> NEW
+        self.scores_path.parent.mkdir(parents=True, exist_ok=True)  # ensure folder exists  # >>> NEW
 
         # --- Layout frames --------------------------------------------------
         root.columnconfigure(0, weight=1)
@@ -244,7 +252,6 @@ class App:
     def _build_controls(self):
         self.hvac = tk.DoubleVar(value=0.0)
         self.bat  = tk.IntVar(value=0)          # will be driven by radios: -1 / 0 / +1
-        self.pv_on = tk.BooleanVar(value=True)
 
         # HVAC slider + arrow buttons
         hvac_frame = ttk.Frame(self.controls)
@@ -279,22 +286,22 @@ class App:
         ttk.Radiobutton(bat_frame, text="Discharge",     value= 1, variable=self.bat).grid(row=0, column=2, padx=2)
         ttk.Label(self.controls, text="Battery (-1/0/+1)").grid(row=1, column=1)
 
-        # PV toggle
-        ttk.Checkbutton(self.controls, text="PV On", variable=self.pv_on,
-                        command=self._update_badges).grid(row=0, column=2, padx=6)
-
         # Buttons
-        ttk.Button(self.controls, text="Step", command=self.step_once).grid(row=0, column=3, padx=6)
+        ttk.Button(self.controls, text="Step", command=self.step_once).grid(row=0, column=2, padx=6)
         self.play_btn = ttk.Button(self.controls, text="▶ Play", command=self.toggle_play)
-        self.play_btn.grid(row=0, column=4, padx=6)
-        ttk.Button(self.controls, text="Reset", command=self.reset).grid(row=0, column=5, padx=6)
-        ttk.Button(self.controls, text="Export CSV", command=self.export).grid(row=0, column=6, padx=6)
-        ttk.Button(self.controls, text="⚙ Settings", command=self.open_settings).grid(row=0, column=7, padx=6)
-        ttk.Button(self.controls, text="Load Replay", command=self._load_replay_csv).grid(row=0, column=8, padx=6)
-        ttk.Checkbutton(self.controls, text="Replay", variable=self.replay_on).grid(row=0, column=9, padx=6)
+        self.play_btn.grid(row=0, column=3, padx=6)
+        ttk.Button(self.controls, text="Reset", command=self.reset).grid(row=0, column=4, padx=6)
+        ttk.Button(self.controls, text="Export CSV", command=self.export).grid(row=0, column=5, padx=6)
+        ttk.Button(self.controls, text="⚙ Settings", command=self.open_settings).grid(row=0, column=6, padx=6)
+        ttk.Button(self.controls, text="Load Replay", command=self._load_replay_csv).grid(row=0, column=7, padx=6)
+        ttk.Checkbutton(self.controls, text="Replay", variable=self.replay_on).grid(row=0, column=8, padx=6)
+
+        # >>> NEW: Day/Score HUD on the right side of the controls
+        hud = ttk.Label(self.controls, textvariable=self.day_var, anchor="e")
+        hud.grid(row=1, column=8, sticky="e", padx=6)  # reuse right-most column
 
         # stretchy columns
-        for c in range(0, 10):
+        for c in range(0, 9):
             self.controls.columnconfigure(c, weight=1)
 
 
@@ -375,7 +382,7 @@ class App:
             price        = float(row.price_eur_per_kwh)
             T_outside    = float(row.t_out_c)
             pv_kwp_yield = float(row.solar_gen_kw_per_kwp)
-            pv_kw        = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
+            pv_kw        = pv_kwp_yield * float(self.settings.pv_size_kw)  # PV always ON
             base_load_kw = float(row.base_load_kw)
 
         # Optional simple gains
@@ -424,6 +431,32 @@ class App:
 
         # 8) advance state before showing SOC
         self.state = step.state
+
+        # >>> REPLACE day/score tracking with tick-based logic (15 min per tick)
+
+        # 4A) accumulate session score
+        self.session_score += reward_tot
+
+        # tick math
+        tick_seconds   = int(getattr(self.engine, "dt", 900))  # engine dt in seconds (default 900)
+        steps_per_day  = int(round(24 * 3600 / tick_seconds))  # 96 for 15-min ticks
+        tick_index     = int(round(self.state.t / tick_seconds))
+
+        # 4B) compute day index from ticks (1..7)
+        day_idx = (tick_index // steps_per_day) + 1
+        if day_idx < 1:
+            day_idx = 1
+        elif day_idx > 7:
+            day_idx = 7
+
+        # update HUD
+        self.day_var.set(f"Day {day_idx}/7  Score: {self.session_score:+.2f} €")
+
+        # 4C) end game right after completing 7 full days
+        if tick_index >= steps_per_day * 7:
+            self._end_game()
+            return
+
 
         # # 9) badges/labels (now safe to use reward_* and new SOC)
         # self.badge_hvac.config(text=f"HVAC {action.hvac:+.1f}")
@@ -487,6 +520,8 @@ class App:
             # battery
             soc=float(self.state.soc),
             cumulative_score=float(getattr(self.state, "cumulative_reward", 0.0)),
+            comfort_score=reward_comf,        # ← NEW
+            financial_score=reward_fin,       # ← NEW
         ))
 
         # 12) status line
@@ -515,7 +550,92 @@ class App:
         self.state = GameState(t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0)
         self.rec = GameRecorder()
         self.charts.reset_time_axes(clear_buffers=True)
+        self.session_score = 0.0  # >>> NEW: reset session score
+        self.day_var.set("Day 1/7  Score: +0.00 €")  # >>> NEW: reset day tracker
         self.status.config(text="Status: Reset.")
+
+    def _end_game(self):  # >>> NEW
+        """Stop the loop and open the save score dialog."""
+        # Stop the tick loop and reset play button
+        if self._tick_after_id:
+            self.root.after_cancel(self._tick_after_id)
+            self._tick_after_id = None
+        self.playing = False
+        self.play_btn.config(text="▶ Play")
+
+        self.status.config(text="Game over! Week complete.")
+        self._show_save_score_dialog(final=True)
+
+    def _show_save_score_dialog(self, final=False):  # >>> NEW
+        """Arcade-style name/initials prompt to save the score to JSON."""
+        win = tk.Toplevel(self.root)
+        win.title("🏁 Game Over — Save Score")
+        win.grab_set()
+        win.resizable(False, False)
+        padx = {"padx": 10, "pady": 6}
+
+        ttk.Label(win, text="GAME OVER", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=2, **padx)
+        ttk.Label(win, text=f"Final Score: {self.session_score:+.2f} €", font=("Segoe UI", 12)).grid(row=1, column=0, columnspan=2, **padx)
+
+        ttk.Label(win, text="Enter Name/Initials:").grid(row=2, column=0, sticky="e", **padx)
+        name_var = tk.StringVar(value="AAA")
+        name_entry = ttk.Entry(win, textvariable=name_var, width=24)
+        name_entry.grid(row=2, column=1, sticky="w", **padx)
+        name_entry.focus_set()
+
+        # Show a tiny leaderboard preview (top 5)
+        board = self._load_scores()
+        top = sorted(board, key=lambda r: r.get("score", 0.0), reverse=True)[:5]
+        if top:
+            ttk.Label(win, text="Top Scores:", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, columnspan=2, **padx)
+            text = "\n".join([f"{i+1:>2}. {r.get('name','---'):<10}  {r.get('score',0.0):>+8.2f} €"
+                              for i, r in enumerate(top)])
+            lbl = ttk.Label(win, text=text, justify="left")
+            lbl.grid(row=4, column=0, columnspan=2, sticky="w", **padx)
+
+        def do_save(close_after=True):
+            name = name_var.get().strip() or "AAA"
+            self._append_score(name=name, score=float(self.session_score))
+            if close_after:
+                win.destroy()
+
+        def save_and_restart():
+            do_save(close_after=True)
+            self.reset()   # back to t=0 with same settings
+
+        btns = ttk.Frame(win)
+        btns.grid(row=5, column=0, columnspan=2, sticky="ew", **padx)
+        ttk.Button(btns, text="Save", command=do_save).pack(side="left", padx=4)
+        ttk.Button(btns, text="Save & Restart", command=save_and_restart).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=4)
+
+    def _load_scores(self):  # >>> NEW
+        """Return the list of score dicts from JSON, or [] if missing/invalid."""
+        try:
+            if self.scores_path.exists():
+                with self.scores_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return data
+        except Exception:
+            pass
+        return []
+
+    def _append_score(self, name: str, score: float):  # >>> NEW
+        """Append a score to the JSON file."""
+        board = self._load_scores()
+        entry = {
+            "name": name,
+            "score": round(float(score), 3),
+            "date": dt.date.today().isoformat(),
+        }
+        board.append(entry)
+        try:
+            with self.scores_path.open("w", encoding="utf-8") as f:
+                json.dump(board, f, indent=2, ensure_ascii=False)
+            self.status.config(text=f"Score saved for {name}: {entry['score']:+.3f} € → {self.scores_path.name}")
+        except Exception as e:
+            self.status.config(text=f"Failed to save score: {e}")
 
     def export(self):
         path = self.rec.export_csv("run.csv")
@@ -533,7 +653,7 @@ class App:
         T_outside    = float(row.t_out_c)
         occupied     = bool(row.occupied_home)
         base_load_kw = float(row.base_load_kw)
-        pv_kw        = pv_kwp_yield * float(self.settings.pv_size_kw) if self.pv_on.get() else 0.0
+        pv_kw        = pv_kwp_yield * float(self.settings.pv_size_kw)  # PV always ON
 
         self.house_view.update(HouseRenderData(
             timestamp=row.ts,
@@ -542,6 +662,8 @@ class App:
             comfort_target_C=self.settings.comfort_target_C,
             comfort_tolerance_C=self.settings.comfort_tolerance_C,
             soc=float(self.state.soc) if hasattr(self.state, "soc") else None,
+            comfort_score=None,        # ← NEW (no reward data in _update_badges)
+            financial_score=None,      # ← NEW (no reward data in _update_badges)
         ))
 
     def _mk_reward_cfg_from_settings(self) -> RewardConfig:

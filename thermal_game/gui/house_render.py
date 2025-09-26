@@ -90,15 +90,19 @@ CONFIG: Dict[str, Any] = {
     # NEW: bottom-center cumulative score
     "score": {
         "enabled": True,
-        "value_scale": 0.10,        # fraction of min(w,h) for the big number
-        "caption_gap_px": 6,
+        "value_scale": 0.07,        # ↓ reduced from 0.10 (smaller font/pills)
+        "caption_gap_px": 4,        # ↓ tighter spacing from 6
         "caption": {"fill": "#9fb0c9", "size": 11, "weight": "normal"},
         "pos_color": "#22c55e",     # green
         "neg_color": "#ef4444",     # red
         "zero_color": "#e6eeff",    # neutral light
         # backdrop pill behind the number (same style as temps)
         "backdrop": {
-            "enabled": True, "pad_px": 6, "radius_px": 10, "alpha": 160, "fill_rgb": (0, 0, 0)
+            "enabled": True,
+            "pad_px": 3,            # ↓ less padding from 6
+            "radius_px": 6,         # ↓ smaller pill from 10
+            "alpha": 160,
+            "fill_rgb": (0, 0, 0)
         },
         "y_frac": 0.88,             # vertical position as a fraction of height
         "prefix": "Σ",              # leading symbol
@@ -144,8 +148,10 @@ class HouseRenderData:
     comfort_tolerance_C: Optional[float] = None
     # Battery
     soc: Optional[float] = None
-    # NEW: cumulative total reward (€/step accumulated)
+    # NEW: reward components
     cumulative_score: Optional[float] = None
+    comfort_score: Optional[float] = None  # ← NEW
+    financial_score: Optional[float] = None  # ← NEW
 
 
 class HouseRenderer(ttk.Frame):
@@ -221,6 +227,9 @@ class HouseRenderer(ttk.Frame):
 
         # NEW: bottom-center cumulative score
         self._draw_score(w, h, d)
+
+        # NEW: left/right reward breakdown
+        self._draw_reward_scores(w, h, d)
 
     # --- primitives ---
     def _bg(self, w: int, h: int) -> None:
@@ -423,12 +432,17 @@ class HouseRenderer(ttk.Frame):
         )
 
         if label:
-            # dynamic font size: fraction of radius (with a sane floor)
             base = int(max(cfg["label"].get("size", 10), float(cfg.get("font_scale", 0.20)) * r))
-            self.canvas.create_text(
-                cx, cy + 2, text=label,
-                fill=cfg["label"]["fill"],
-                font=("", base, cfg["label"]["weight"])
+            
+            # Use the same translucent black pill background
+            backdrop_cfg = self._config["temps"]["backdrop"]
+            
+            # Use the same helper used for temperature and score labels
+            self._text_with_backdrop(
+                cx, cy + 2, label,
+                fill=color,  # use the SOC arc color
+                font=("", base, cfg["label"]["weight"]),
+                anchor="c"
             )
 
     def _soc_color(self, frac: float, cfg: dict) -> str:
@@ -520,6 +534,51 @@ class HouseRenderer(ttk.Frame):
             cfg["backdrop"] = self._config["temps"]["backdrop"]
         self._text_with_backdrop(x, y, display_text,
                                  fill=color, font=("", value_font_size, "bold"))
+
+    def _draw_reward_scores(self, w: int, h: int, d: HouseRenderData) -> None:
+        cfg = self._config.get("score", {})
+        if not cfg or not cfg.get("enabled", True):
+            return
+
+        m = min(w, h)
+        value_font_size = max(10, int(float(cfg.get("value_scale", 0.07)) * m))
+        gap = int(cfg.get("caption_gap_px", 6))
+        y = int(float(cfg.get("y_frac", 0.88)) * h)
+
+        # Left = Comfort | Right = Financial
+        side_x = {
+            "comfort": int(w * 0.18),    # left
+            "financial": int(w * 0.82),  # right
+        }
+
+        # Define caption and values
+        scores = {
+            "comfort": {
+                "value": d.comfort_score,
+                "label": "Comfort",
+                "color": cfg.get("pos_color", "#22c55e") if (d.comfort_score or 0) >= 0 else cfg.get("neg_color", "#ef4444"),
+            },
+            "financial": {
+                "value": d.financial_score,
+                "label": "Financial",
+                "color": cfg.get("pos_color", "#22c55e") if (d.financial_score or 0) >= 0 else cfg.get("neg_color", "#ef4444"),
+            }
+        }
+
+        for key, meta in scores.items():
+            val = meta["value"]
+            if val is None:
+                continue
+            x = side_x[key]
+            signed = f"{val:+.3f}€"
+            self.canvas.create_text(x, y - value_font_size - gap,
+                                    text=meta["label"],
+                                    anchor="s",
+                                    fill=cfg["caption"]["fill"],
+                                    font=("", cfg["caption"]["size"], cfg["caption"]["weight"]))
+            self._text_with_backdrop(x, y, signed,
+                                     fill=meta["color"],
+                                     font=("", value_font_size, "bold"))
 
 
 __all__ = ["HouseRenderer", "HouseRenderData", "CONFIG"]

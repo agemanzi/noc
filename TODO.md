@@ -16,11 +16,13 @@
 
         SCORE SAVE
 
-        AI 
+        AI                          
+            Replaz, done
+
         SOC GRAFIKA
         TIN T OUT LABLE JE UGLY AF
         NAHRAT TAM REAL DATA 
-
+            DONE
 
         optrional:
 
