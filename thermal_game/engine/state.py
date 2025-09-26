@@ -26,6 +26,9 @@ class GameState:
     cumulative_reward: float = 0.0
     cumulative_financial: float = 0.0
     cumulative_comfort: float = 0.0
+    
+    # NEW: envelope temperature for R3C2 model
+    T_envelope: float = 22.0
 
 @dataclass
 class StepResult:

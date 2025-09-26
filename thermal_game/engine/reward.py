@@ -10,32 +10,40 @@ BULGARIAN_EXPORT_SCALING = 1.0      # use if export needs different scaling (opt
 
 @dataclass
 class RewardConfig:
-    # comfort
+    # comfort - tighter bands and higher penalties for challenge
     comfort_target_C: float = 22.0
-    comfort_tolerance_C: float = 1.0
+    comfort_tolerance_occupied_C: float = 0.5    # ±0.5°C when occupied
+    comfort_tolerance_unoccupied_C: float = 1.0  # ±1.0°C when unoccupied  
     # NOTE: units are €/deg²·step (the GUI converts from €/deg²·hour via dt_h)
-    comfort_weight: float = 0.5
+    comfort_weight: float = 1.5  # increased from 0.5 to make comfort more important
 
     # NEW: positive reward when inside the comfort band
     # Paid at the *center* of the band and tapers to 0 at the band edge.
     # Set to 0.0 to disable (default keeps backward compatibility).
     comfort_inside_bonus: float = 0.0  # €/step at center
 
+    # Complaint spikes - extra penalty for persistent discomfort
+    complaint_threshold_C: float = 1.0    # trigger complaint if outside this band
+    complaint_penalty_per_step: float = 1.0  # extra penalty per step of complaint
+    complaint_duration_threshold: int = 2     # steps before complaint triggers
+
     # tariffs
     export_tariff_ratio: float = 0.4  # export gets 40% of spot by default
 
 
 def comfort_penalty(T_in: float, occupied: int,
-                    target_C: float, tol_C: float) -> float:
-    """Squared penalty outside the comfort band; zero if unoccupied."""
-    if not occupied:
-        return 0.0
+                    target_C: float, tol_occupied_C: float, tol_unoccupied_C: float = None) -> float:
+    """Squared penalty outside the comfort band; different tolerances for occupied vs unoccupied."""
+    if tol_unoccupied_C is None:
+        tol_unoccupied_C = tol_occupied_C
+    
+    tol_C = tol_occupied_C if occupied else tol_unoccupied_C
     diff = abs(T_in - target_C) - tol_C
     return float(max(0.0, diff)**2)
 
 
 def comfort_bonus(T_in: float, occupied: int,
-                  target_C: float, tol_C: float,
+                  target_C: float, tol_occupied_C: float, tol_unoccupied_C: float,
                   bonus_at_center: float) -> float:
     """
     Positive reward when inside the band. Linear taper:
@@ -43,14 +51,42 @@ def comfort_bonus(T_in: float, occupied: int,
       if dist >= tol -> 0
       else -> bonus_at_center * (1 - dist/tol)
     Zero if unoccupied or tol <= 0 or bonus_at_center == 0.
+    Uses different tolerances for occupied vs unoccupied.
     """
-    if not occupied or bonus_at_center <= 0.0 or tol_C <= 0.0:
+    if not occupied or bonus_at_center <= 0.0:
         return 0.0
+    
+    tol_C = tol_occupied_C if occupied else tol_unoccupied_C
+    if tol_C <= 0.0:
+        return 0.0
+    
     dist = abs(T_in - target_C)
     if dist >= tol_C:
         return 0.0
     frac = 1.0 - (dist / tol_C)        # 1 at center, 0 at edge
     return float(bonus_at_center * max(0.0, min(1.0, frac)))
+
+
+def complaint_penalty(T_in: float, occupied: int, target_C: float, 
+                     complaint_threshold_C: float, complaint_count: int,
+                     duration_threshold: int, penalty_per_step: float) -> tuple[float, int]:
+    """
+    Track consecutive steps outside complaint threshold and apply extra penalty.
+    Returns (penalty, new_complaint_count)
+    """
+    if not occupied:
+        return 0.0, 0
+    
+    outside_complaint_zone = abs(T_in - target_C) > complaint_threshold_C
+    
+    if outside_complaint_zone:
+        new_complaint_count = complaint_count + 1
+        if new_complaint_count >= duration_threshold:
+            return penalty_per_step, new_complaint_count
+        else:
+            return 0.0, new_complaint_count
+    else:
+        return 0.0, 0  # reset complaint counter when back in zone
 
 
 def opex_terms(import_kwh: float, export_kwh: float,
@@ -71,35 +107,47 @@ def step_reward(*,
                 import_kwh: float,
                 export_kwh: float,
                 price_eur_per_kwh: float,
-                cfg: Optional[RewardConfig] = None) -> dict:
+                cfg: Optional[RewardConfig] = None,
+                complaint_count: int = 0) -> dict:
     """
-    Returns: comfort_penalty, comfort_bonus, import_cost, export_credit, net_opex,
-             comfort_score, financial_score, reward_total, reward(=alias)
+    Returns: comfort_penalty, comfort_bonus, complaint_penalty, import_cost, export_credit, net_opex,
+             comfort_score, financial_score, reward_total, reward(=alias), new_complaint_count
 
     Conventions (higher is better):
       financial_score = +export_credit - import_cost = -net_opex
-      comfort_score   = -comfort_weight * comfort_penalty + comfort_bonus
+      comfort_score   = -comfort_weight * comfort_penalty + comfort_bonus - complaint_penalty
       reward_total    = financial_score + comfort_score
     """
     cfg = cfg or RewardConfig()  # safe default (new instance)
 
-    cpen = comfort_penalty(Tin_C, occupied, cfg.comfort_target_C, cfg.comfort_tolerance_C)
+    cpen = comfort_penalty(Tin_C, occupied, cfg.comfort_target_C, 
+                          cfg.comfort_tolerance_occupied_C, cfg.comfort_tolerance_unoccupied_C)
     cbon = comfort_bonus(Tin_C, occupied,
-                         cfg.comfort_target_C, cfg.comfort_tolerance_C,
+                         cfg.comfort_target_C, 
+                         cfg.comfort_tolerance_occupied_C, cfg.comfort_tolerance_unoccupied_C,
                          cfg.comfort_inside_bonus)
+    
+    # Handle complaint penalty
+    complaint_pen, new_complaint_count = complaint_penalty(
+        Tin_C, occupied, cfg.comfort_target_C,
+        cfg.complaint_threshold_C, complaint_count,
+        cfg.complaint_duration_threshold, cfg.complaint_penalty_per_step
+    )
 
     terms = opex_terms(import_kwh, export_kwh,
                        import_price=price_eur_per_kwh,
                        export_price=price_eur_per_kwh * cfg.export_tariff_ratio)
 
     financial_score = -terms["net_opex"]
-    comfort_score   = -cfg.comfort_weight * cpen + cbon
+    comfort_score   = -cfg.comfort_weight * cpen + cbon - complaint_pen
     reward_total    = financial_score + comfort_score
 
     return {
         **terms,
         "comfort_penalty": cpen,
         "comfort_bonus":   cbon,
+        "complaint_penalty": complaint_pen,
+        "new_complaint_count": new_complaint_count,
         "financial_score": financial_score,
         "comfort_score":   comfort_score,
         "reward_total":    reward_total,

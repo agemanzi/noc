@@ -33,6 +33,7 @@ class Charts:
             "price": collections.deque(maxlen=max_points),
             "occupied": collections.deque(maxlen=max_points),
             "Tin": collections.deque(maxlen=max_points),
+            "Te": collections.deque(maxlen=max_points),
             "Tout": collections.deque(maxlen=max_points),
             "solar": collections.deque(maxlen=max_points),
             # rewards (all €/step)
@@ -81,6 +82,7 @@ class Charts:
         (self.l_batt_act,) = self.ax_actions.plot([], [], lw=1.2, label="Battery action")
         (self.l_price,)    = self.ax_price.plot([], [], lw=1.5, color="green", label="Price")
         (self.l_Tin,)      = self.ax_temp.plot([], [], lw=2, label="T_inside")
+        (self.l_Te,)       = self.ax_temp.plot([], [], lw=1.5, linestyle="--", alpha=0.8, label="T_envelope")
 
         (self.l_soc,)    = self.ax_actions.plot(
             [], [], linestyle="--", alpha=0.8, lw=1.2,
@@ -261,6 +263,7 @@ class Charts:
 
 
         B["Tin"].append(getattr(s, "T_inside", metrics.get("T_inside")))
+        B["Te"].append(getattr(s, "T_envelope", metrics.get("T_envelope", getattr(s, "T_inside", 22.0))))
         B["Tout"].append(metrics.get("T_outside", getattr(s, "T_outside", None)))
         B["solar"].append(metrics.get("solar"))
 
@@ -392,6 +395,12 @@ class Charts:
         n  = min(t.size, Tin.size)
         tt, Tin_t = t[-n:], Tin[-n:]
         self.l_Tin.set_data(tt, Tin_t)
+        
+        # T_envelope
+        Te   = np.asarray(self.buf["Te"], dtype=float)
+        n_te = min(t.size, Te.size)
+        tt_te, Te_t = t[-n_te:], Te[-n_te:]
+        self.l_Te.set_data(tt_te, Te_t)
 
         # One-time attrs
         if not hasattr(self, "_styled_reward_lines"):

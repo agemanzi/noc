@@ -85,6 +85,22 @@ CONFIG: Dict[str, Any] = {
             # NEW: color thresholds
             "colors": {"low": "#ef4444", "mid": "#f59e0b", "high": "#22c55e"},
             "thresholds": {"low": 0.20, "mid": 0.60},  # ≤20% red, ≤60% orange, else green
+        },
+        "hvac": {  # NEW
+            "corner": "top_right",         # mirror SOC default (SOC is top_left)
+            "radius_frac": 0.20,
+            "pad_frac": 0.02,
+            "span_deg": 260,
+            "start_deg": 140,
+            "bg": "#5a6780",
+            "thickness_frac": 0.14,
+            "font_scale": 0.22,
+            # colors by operating mode
+            "colors": {
+                "heat": "#f59e0b",   # amber for heating
+                "cool": "#3b82f6",   # blue for cooling
+                "idle": "#9ca3af"    # gray when off
+            },
         }
     },
     # NEW: bottom-center cumulative score
@@ -122,6 +138,7 @@ CONFIG: Dict[str, Any] = {
         # Only these two are considered now:
         "show_soc": True,
         "show_temps": True,
+        "show_hvac": True,        # NEW: enable HVAC gauge
         # The rest of the old renderer elements are off by design.
     },
 }
@@ -148,6 +165,11 @@ class HouseRenderData:
     comfort_tolerance_C: Optional[float] = None
     # Battery
     soc: Optional[float] = None
+    # NEW: HVAC telemetry
+    hvac_elec_kw: Optional[float] = None   # electrical input (+kW draw)
+    hvac_heat_kw: Optional[float] = None   # thermal output (+kW heat, −kW cool)
+    hvac_cop: Optional[float] = None       # optional; when available
+    hvac_nameplate_kw: Optional[float] = None  # optional; for % utilization
     # NEW: reward components
     cumulative_score: Optional[float] = None
     comfort_score: Optional[float] = None  # ← NEW
@@ -224,6 +246,10 @@ class HouseRenderer(ttk.Frame):
         # SOC gauge in corner
         if self._config["feature_flags"]["show_soc"] and d.soc is not None:
             self._draw_soc(w, h, float(d.soc))
+
+        # HVAC gauge (mirrors SOC in the opposite corner)
+        if self._config["feature_flags"].get("show_hvac", False):
+            self._draw_hvac(w, h, d)
 
         # NEW: bottom-center cumulative score
         self._draw_score(w, h, d)
@@ -387,6 +413,15 @@ class HouseRenderer(ttk.Frame):
                                 text="inside", anchor="n",
                                 fill=units["fill"], font=("", units["size"], units["weight"]))
 
+    def _corner_xy(self, corner: str, r: int, pad: int, w: int, h: int) -> tuple[int, int]:
+        if corner == "top_left":
+            return r + pad, r + pad
+        if corner == "top_right":
+            return w - r - pad, r + pad
+        if corner == "bottom_left":
+            return r + pad, h - r - pad
+        return w - r - pad, h - r - pad
+
     def _draw_soc(self, w: int, h: int, soc: float) -> None:
         cfg = self._config["gauges"]["soc"]
         m = min(w, h)
@@ -394,14 +429,7 @@ class HouseRenderer(ttk.Frame):
         pad = int(cfg["pad_frac"] * m)
 
         corner = str(cfg.get("corner", "top_left"))
-        if corner == "top_left":
-            cx, cy = r + pad, r + pad
-        elif corner == "top_right":
-            cx, cy = w - r - pad, r + pad
-        elif corner == "bottom_left":
-            cx, cy = r + pad, h - r - pad
-        else:
-            cx, cy = w - r - pad, h - r - pad
+        cx, cy = self._corner_xy(corner, r, pad, w, h)
 
         frac = max(0.0, min(1.0, float(soc)))
         color = self._soc_color(frac, cfg)
@@ -453,6 +481,61 @@ class HouseRenderer(ttk.Frame):
         if frac <= float(th.get("mid", 0.60)):
             return cols.get("mid", "#f59e0b")
         return cols.get("high", "#22c55e")
+
+    def _draw_hvac(self, w: int, h: int, d: HouseRenderData) -> None:
+        cfg = self._config["gauges"]["hvac"]
+        m = min(w, h)
+        r = max(8, int(cfg["radius_frac"] * m))
+        pad = int(cfg["pad_frac"] * m)
+        cx, cy = self._corner_xy(str(cfg.get("corner", "top_right")), r, pad, w, h)
+
+        # read values with safe fallbacks
+        q_kw = float(d.hvac_heat_kw) if d.hvac_heat_kw is not None else 0.0
+        p_kw = d.hvac_elec_kw
+        cop  = d.hvac_cop
+
+        # mode & color
+        if abs(q_kw) < 1e-6 and (p_kw is None or p_kw < 1e-6):
+            mode = "idle"
+        else:
+            mode = "heat" if q_kw >= 0 else "cool"
+        color = cfg["colors"].get(mode, "#9ca3af")
+
+        # normalize arc fill: show utilization vs plausible size
+        # Use nameplate if available, else default to 5.0 kW
+        denom = max(1e-6, float(d.hvac_nameplate_kw)) if getattr(d, "hvac_nameplate_kw", None) else 5.0
+        frac = max(0.0, min(1.0, abs(q_kw) / denom))
+
+        # label text (two lines)
+        sign = "+" if q_kw >= 0 else "−"
+        top_line = f"{sign}{abs(q_kw):.1f} kW" if (d.hvac_heat_kw is not None) else "—"
+        if p_kw is not None and cop is not None and cop == cop:  # cop==cop filters NaN
+            bottom_line = f"{p_kw:.1f} kW • COP {cop:.1f}"
+        elif p_kw is not None:
+            bottom_line = f"{p_kw:.1f} kW"
+        else:
+            bottom_line = "—"
+
+        # draw base/active arcs
+        start = int(cfg["start_deg"]); span = int(cfg["span_deg"])
+        thickness = max(6, int(float(cfg.get("thickness_frac", 0.12)) * r))
+        # background ring
+        self.canvas.create_arc(cx - r, cy - r, cx + r, cy + r,
+                               start=start, extent=span, style="arc",
+                               outline=cfg.get("bg", "#5a6780"), width=thickness)
+        # foreground
+        extent = int(span * frac)
+        self.canvas.create_arc(cx - r, cy - r, cx + r, cy + r,
+                               start=start, extent=extent, style="arc",
+                               outline=color, width=thickness)
+
+        # labels (centered), reuse pill backdrop
+        base = int(max(10, float(cfg.get("font_scale", 0.20)) * r))
+        small = max(8, int(base * 0.60))
+        self._text_with_backdrop(cx, cy - int(base*0.15),
+                                 top_line, fill=color, font=("", base, "bold"))
+        self._text_with_backdrop(cx, cy + int(base*0.85),
+                                 bottom_line, fill="#e6eeff", font=("", small, "normal"))
 
     def _draw_clock(self, w: int, h: int, d: HouseRenderData) -> None:
         cfg = self._config.get("clock", {})

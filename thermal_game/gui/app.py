@@ -22,7 +22,7 @@ import datetime as dt
 
 
 from .plots import Charts
-TICKS = 100  # ms between steps when playing
+TICKS = 20  # ms between steps when playing
 RAND = random.Random(42)
 
 class App:
@@ -30,7 +30,7 @@ class App:
         
         data_dir = Path(__file__).resolve().parent.parent / "data"
         weather_csv = data_dir / "weekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"
-        # weather_csv = data_dir / "week01_prices_weather_seasons_2025-01-01.csv"
+        weather_csv = data_dir / "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_2025.csv"
 
 
         
@@ -45,7 +45,7 @@ class App:
         self.feed.set_anchor_date(self.settings.start_date)
         self.start_dt = dt.datetime.combine(self.settings.start_date, dt.time(0, 0))
         self.state = GameState(
-            t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0
+            t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0, T_envelope=22.0
         )
 
         # --- Game/session trackers ---------------------------------------------------
@@ -90,9 +90,10 @@ class App:
 
         # Use settings for both rewards and plotting
         self.reward_cfg = self._mk_reward_cfg_from_settings()
-        # Charts: set comfort band from settings (target ± tol)
-        lo = self.settings.comfort_target_C - self.settings.comfort_tolerance_C
-        hi = self.settings.comfort_target_C + self.settings.comfort_tolerance_C
+        # Charts: set comfort band from settings using occupied tolerance initially
+        init_tol = self.settings.comfort_tolerance_occupied_C
+        lo = self.settings.comfort_target_C - init_tol
+        hi = self.settings.comfort_target_C + init_tol
         self.charts = Charts(self.right, comfort=(lo, hi))        
         self.charts.reset_time_axes(clear_buffers=True)  # ensure clean state for initial anchor
         
@@ -370,6 +371,14 @@ class App:
         row = self.feed.by_time(self.state.t)
         occupied = bool(row.occupied_home)
 
+        # pick tolerance by occupancy and refresh reward cfg + chart band
+        tol = self.settings.tolerance_for(occupied)
+        self.reward_cfg = self._mk_reward_cfg_from_settings(tol_C=tol)
+        self.charts.comfort = (
+            self.settings.comfort_target_C - tol,
+            self.settings.comfort_target_C + tol
+        )
+
         # 3) inputs (use CSV values in replay; otherwise from feed/settings)
         if replay_row is not None:
             price        = float(replay_row["price"])
@@ -423,6 +432,15 @@ class App:
         net_opex    = float(m.get("net_opex", m.get("opex_cost", 0.0)))  # compatibility
         reward_fin  = float(m.get("reward_fin", -net_opex))               # financial = -net_opex
         reward_comf = float(m.get("reward_comf", reward_tot - reward_fin))# comfort = total - financial
+
+        # HVAC telemetry (thermal output, electric draw, COP)
+        hvac_heat_kw = float(m.get("q_hvac_kw", 0.0))   # +heat, −cool
+        hvac_elec_kw = float(m.get("hvac_kw", 0.0))     # +draw
+        hvac_cop     = m.get("hvac_cop", None)
+        try:
+            hvac_cop = float(hvac_cop) if hvac_cop is not None else None
+        except Exception:
+            hvac_cop = None
 
         # 7) occupancy text + house overlay
         # self.occupancy_var.set("Occupied" if occupied else "Away")
@@ -519,6 +537,13 @@ class App:
 
             # battery
             soc=float(self.state.soc),
+            
+            # HVAC telemetry
+            hvac_elec_kw=hvac_elec_kw,
+            hvac_heat_kw=hvac_heat_kw,
+            hvac_cop=hvac_cop,
+            hvac_nameplate_kw=float(self.settings.hvac_size_kw),
+            
             cumulative_score=float(getattr(self.state, "cumulative_reward", 0.0)),
             comfort_score=reward_comf,        # ← NEW
             financial_score=reward_fin,       # ← NEW
@@ -547,7 +572,7 @@ class App:
             self._tick_after_id = None
         self.playing = False
         self.play_btn.config(text="▶ Play")
-        self.state = GameState(t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0)
+        self.state = GameState(t=0, T_inside=22.0, T_outside=30.0, soc=0.5, kwh_used=0.0, T_envelope=22.0)
         self.rec = GameRecorder()
         self.charts.reset_time_axes(clear_buffers=True)
         self.session_score = 0.0  # >>> NEW: reset session score
@@ -662,26 +687,32 @@ class App:
             comfort_target_C=self.settings.comfort_target_C,
             comfort_tolerance_C=self.settings.comfort_tolerance_C,
             soc=float(self.state.soc) if hasattr(self.state, "soc") else None,
+            
+            # HVAC telemetry (no current data in _update_badges)
+            hvac_elec_kw=0.0,
+            hvac_heat_kw=0.0,
+            hvac_cop=None,
+            hvac_nameplate_kw=float(self.settings.hvac_size_kw),
+            
             comfort_score=None,        # ← NEW (no reward data in _update_badges)
             financial_score=None,      # ← NEW (no reward data in _update_badges)
         ))
 
-    def _mk_reward_cfg_from_settings(self) -> RewardConfig:
-        # Translate anchor (€/deg²·hour) to per-step (€/deg²·step)
+    def _mk_reward_cfg_from_settings(self, tol_C: float | None = None) -> RewardConfig:
+        # €/deg²·step from €/deg²·hour
         cw = float(self.settings.comfort_anchor_eur_per_deg2_hour) * self.engine.dt_h
+        tol = float(tol_C if tol_C is not None else self.settings.comfort_tolerance_occupied_C)
 
         cfg_kwargs = dict(
             comfort_target_C    = self.settings.comfort_target_C,
-            comfort_tolerance_C = self.settings.comfort_tolerance_C,
+            comfort_tolerance_occupied_C = self.settings.comfort_tolerance_occupied_C,
+            comfort_tolerance_unoccupied_C = self.settings.comfort_tolerance_unoccupied_C,
             comfort_weight      = cw,
             export_tariff_ratio = self.settings.export_tariff_ratio,
         )
-
-        # Add only if the RewardConfig you're importing actually has it
         if hasattr(RewardConfig, "__dataclass_fields__") and \
            "comfort_inside_bonus" in RewardConfig.__dataclass_fields__:
             cfg_kwargs["comfort_inside_bonus"] = float(self.settings.comfort_inside_bonus_eur_per_step)
-
         return RewardConfig(**cfg_kwargs)
     def open_settings(self):
         # --- PRESETS ------------------------------------------------------------
@@ -708,12 +739,13 @@ class App:
         date_var = tk.StringVar(value=self.settings.start_date.isoformat())
 
         # comfort/econ vars
-        ctgt_var   = tk.DoubleVar(value=self.settings.comfort_target_C)
-        ctol_var   = tk.DoubleVar(value=self.settings.comfort_tolerance_C)
-        cwgt_var   = tk.DoubleVar(value=self.settings.comfort_weight)
-        xrt_var    = tk.DoubleVar(value=self.settings.export_tariff_ratio)
-        anchor_var = tk.DoubleVar(value=self.settings.comfort_anchor_eur_per_deg2_hour)
-        bonus_var = tk.DoubleVar(value=self.settings.comfort_inside_bonus_eur_per_step)
+        ctgt_var     = tk.DoubleVar(value=self.settings.comfort_target_C)
+        ctol_occ_var = tk.DoubleVar(value=self.settings.comfort_tolerance_occupied_C)
+        ctol_unocc_var = tk.DoubleVar(value=self.settings.comfort_tolerance_unoccupied_C)
+        cwgt_var     = tk.DoubleVar(value=self.settings.comfort_weight)
+        xrt_var      = tk.DoubleVar(value=self.settings.export_tariff_ratio)
+        anchor_var   = tk.DoubleVar(value=self.settings.comfort_anchor_eur_per_deg2_hour)
+        bonus_var    = tk.DoubleVar(value=self.settings.comfort_inside_bonus_eur_per_step)
 
         r = 0
 
@@ -747,8 +779,11 @@ class App:
         ttk.Label(win, text="Comfort target (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(win, textvariable=ctgt_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
 
-        ttk.Label(win, text="Comfort tolerance (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(win, textvariable=ctol_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+        ttk.Label(win, text="Comfort tolerance occupied (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=ctol_occ_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
+
+        ttk.Label(win, text="Comfort tolerance unoccupied (°C)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(win, textvariable=ctol_unocc_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
 
         ttk.Label(win, text="Comfort weight (€/step)").grid(row=r, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(win, textvariable=cwgt_var).grid(row=r, column=1, sticky="ew", padx=6, pady=4); r += 1
@@ -779,16 +814,18 @@ class App:
 
             # persist comfort/tariff
             self.settings.comfort_target_C    = ctgt_var.get()
-            self.settings.comfort_tolerance_C = ctol_var.get()
+            self.settings.comfort_tolerance_occupied_C = ctol_occ_var.get()
+            self.settings.comfort_tolerance_unoccupied_C = ctol_unocc_var.get()
             self.settings.comfort_weight      = cwgt_var.get()
             self.settings.export_tariff_ratio = xrt_var.get()
             self.settings.comfort_anchor_eur_per_deg2_hour = anchor_var.get()
             self.settings.comfort_inside_bonus_eur_per_step = bonus_var.get()
 
-            # refresh reward cfg + chart band
+            # refresh reward cfg + chart band (use occupied tolerance for initial display)
             self.reward_cfg = self._mk_reward_cfg_from_settings()
-            lo = self.settings.comfort_target_C - self.settings.comfort_tolerance_C
-            hi = self.settings.comfort_target_C + self.settings.comfort_tolerance_C
+            init_tol = self.settings.comfort_tolerance_occupied_C
+            lo = self.settings.comfort_target_C - init_tol
+            hi = self.settings.comfort_target_C + init_tol
             self.charts.comfort = (lo, hi)
 
             # jump to new start date (t=0)
