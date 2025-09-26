@@ -38,8 +38,8 @@ WEATHER_CSV_NAME = "_2ndweekXX_prices_weather_seasons_FROM_2023_RELABELED_TO_202
 LOAD_CSV_NAME    = "load_profile.csv"
 
 START_DATE        = dt.date(2025, 3, 1)
-# TIMESTEPS         = 500_000
-TIMESTEPS         = 5_000
+TIMESTEPS         = 500_000
+# TIMESTEPS         = 5_000
 
 N_ENVS            = 4
 STEPS_PER_EPISODE = 4 * 24 * 7
